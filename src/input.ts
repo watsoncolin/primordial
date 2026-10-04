@@ -46,6 +46,12 @@ export class Input {
     })
   }
 
+  /** Forget any held pointer/keys, e.g. after a UI overlay took over. */
+  release() {
+    this.pointer = null
+    this.keys.clear()
+  }
+
   read(cellX: number, cellY: number, cellScreenR: number) {
     const s = this.steer
     let x = 0

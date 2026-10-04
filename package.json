@@ -9,7 +9,9 @@
     "preview": "vite preview --host",
     "typecheck": "tsc",
     "format": "prettier --write .",
-    "soak": "tsx scripts/soak.mts"
+    "soak": "tsx scripts/soak.mts",
+    "handling": "tsx scripts/handling.mts",
+    "tail": "tsx scripts/tail.mts"
   },
   "devDependencies": {
     "prettier": "^3.9.9",

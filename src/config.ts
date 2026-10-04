@@ -26,6 +26,9 @@ export const tuning = {
   frontDrag: 1.2,
   stiffness: 90,
   wobbleDamping: 2.5,
+  // Flagellum
+  flagellumPower: 1.4,
+  flagellumTurn: 240,
   // Feeding
   capture: 260,
   // Ecosystem

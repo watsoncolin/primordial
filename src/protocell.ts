@@ -1,9 +1,11 @@
 import type { Brain } from './ai'
 import { EAT_RATIO, MASS_EXPONENT, PROTOCELL_RADIUS, WORLD, tuning } from './config'
+import { Flagellum } from './flagellum'
 import type { Fluid } from './fluid'
-import { TAU, rand, wrapDelta } from './math'
+import { TAU, clamp, rand, wrapDelta } from './math'
 import type { Kind } from './nutrients'
 import { glowSprite } from './sprites'
+import type { TraitId } from './traits'
 import type { Vent } from './vents'
 import type { View } from './view'
 
@@ -24,6 +26,8 @@ interface Blob extends Body {
 }
 
 const POINTS = 28
+/** The membrane point at the back of the rest shape (rest angle π), where a tail attaches. */
+const REAR = POINTS / 2
 /** Seconds an engulfed cell takes to be drawn in and dissolved. */
 const ENGULF_TIME = 0.5
 
@@ -97,9 +101,13 @@ export class Protocell {
   brain: Brain | null = null
   /** Temporary thrust multiplier (an engulfer's lunge). */
   boost = 1
-  /** Last steering input, for the fluid jet. */
+  readonly traits = new Set<TraitId>()
+  flagellum: Flagellum | null = null
+  /** Direction of the last applied thrust, and where it pushes on the water. */
   steerX = 0
   steerY = 0
+  jetX = 0
+  jetY = 0
   cx = 0
   cy = 0
   cvx = 0
@@ -157,6 +165,12 @@ export class Protocell {
     this.targetR = PROTOCELL_RADIUS * Math.sqrt(this.biomass)
   }
 
+  addTrait(id: TraitId) {
+    this.traits.add(id)
+    if (id === 'flagellum') this.flagellum = new Flagellum()
+    this.flash = 1
+  }
+
   /** Can this cell swallow `other` whole? */
   canEat(other: Protocell) {
     return other.biomass <= this.biomass * EAT_RATIO
@@ -188,8 +202,6 @@ export class Protocell {
     } else {
       this.R += (this.targetR - this.R) * Math.min(1, dt * 1.5)
     }
-    this.steerX = ix
-    this.steerY = iy
     const { cx, cy, cvx, cvy, R, pts, restX, restY, nx, ny, weight } = this
 
     // Best-fit rotation of the rest circle onto the current points (2D shape matching),
@@ -210,14 +222,39 @@ export class Protocell {
     const pulse = 1 - tuning.pulse * (0.5 - 0.5 * Math.sin(time * tuning.pulseRate * TAU))
     // Heavier cells accelerate less; lighter ones don't get a bonus, or small prey would outrun everything.
     const massFactor = Math.min(1, Math.pow(this.biomass, MASS_EXPONENT - 1))
-    const thrust = tuning.thrust * THRUST_SCALE[this.species] * this.boost * massFactor * mag * pulse
+    const base = tuning.thrust * THRUST_SCALE[this.species] * this.boost * massFactor * mag
+    let tx = ix * base * pulse
+    let ty = iy * base * pulse
+
+    // With a flagellum the real push comes from the tail and only points the way the body faces
+    // (rest angle 0, opposite the tail). Steering becomes torque: the body has to swing around.
+    let turn = 0
+    let tailEffort = 0
+    const tail = this.flagellum
+    if (tail && mag > 0) {
+      const fx = cos
+      const fy = sin
+      const err = Math.atan2(fx * iy - fy * ix, fx * ix + fy * iy)
+      const align = Math.max(0, Math.cos(err))
+      turn = tuning.flagellumTurn * clamp(err * 1.5, -1, 1) * mag
+      tailEffort = mag * align
+      const push = base * tuning.flagellumPower * align * align * tail.growth
+      // The cell's own squirm is weak next to the tail.
+      tx = tx * 0.3 + fx * push
+      ty = ty * 0.3 + fy * push
+    }
+    const thrust = Math.hypot(tx, ty)
     this.thrust = thrust
+    const dirX = thrust > 0 ? tx / thrust : 0
+    const dirY = thrust > 0 ? ty / thrust : 0
+    this.steerX = dirX
+    this.steerY = dirY
 
     let wsum = 0
     for (let i = 0; i < POINTS; i++) {
       nx[i] = restX[i] * cos - restY[i] * sin
       ny[i] = restX[i] * sin + restY[i] * cos
-      weight[i] = 0.35 + Math.max(0, -(nx[i] * ix + ny[i] * iy))
+      weight[i] = 0.35 + Math.max(0, -(nx[i] * dirX + ny[i] * dirY))
       wsum += weight[i]
     }
 
@@ -239,8 +276,8 @@ export class Protocell {
       ay -= rvy * k
 
       const share = (thrust * POINTS * weight[i]) / wsum
-      ax += ix * share
-      ay += iy * share
+      ax += dirX * share + -ny[i] * turn
+      ay += dirY * share + nx[i] * turn
 
       p.vx += ax * dt
       p.vy += ay * dt
@@ -250,6 +287,15 @@ export class Protocell {
     }
 
     this.updateCentroid()
+    if (tail) {
+      const m = pts[REAR]
+      tail.step(dt, fluid, m.x, m.y, nx[REAR], ny[REAR], this.R, tailEffort)
+      this.jetX = tail.jetX
+      this.jetY = tail.jetY
+    } else {
+      this.jetX = this.cx - dirX * this.R * 1.3
+      this.jetY = this.cy - dirY * this.R * 1.3
+    }
     for (const b of this.inner) this.stepBlob(b, dt, time)
     for (let i = this.digesting.length - 1; i >= 0; i--) {
       const b = this.digesting[i]
@@ -348,7 +394,7 @@ export class Protocell {
     const cx = view.sx(this.cx)
     const cy = view.sy(this.cy)
     const R = this.R * view.zoom
-    if (!view.onScreen(cx, cy, R * 2.5)) return
+    if (!view.onScreen(cx, cy, R * (this.flagellum ? 3.5 : 2.5))) return
     const pal = this.palette
     const alpha = this.screenAlpha
     ctx.globalAlpha = alpha
@@ -366,6 +412,9 @@ export class Protocell {
       path.quadraticCurveTo(sx[i], sy[i], (sx[i] + sx[j]) / 2, (sy[i] + sy[j]) / 2)
     }
     path.closePath()
+
+    // The tail sits behind the body, so it seems to grow out from under the membrane.
+    this.flagellum?.draw(ctx, this.cx, this.cy, cx, cy, view.zoom, this.R, pal.rim)
 
     if (this.aura) {
       ctx.globalCompositeOperation = 'lighter'
@@ -507,5 +556,6 @@ export class Protocell {
     }
     this.cx += shiftX
     this.cy += shiftY
+    this.flagellum?.shift(shiftX, shiftY)
   }
 }

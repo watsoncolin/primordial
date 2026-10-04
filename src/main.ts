@@ -9,6 +9,7 @@ import { clamp, rand, wrapCoord, wrapDelta } from './math'
 import { type Kind, Nutrients } from './nutrients'
 import { NUTRIENT_RGB, Protocell, type Species } from './protocell'
 import { type Vent, placeVents } from './vents'
+import { EVOLUTION_COST, TRAITS, type TraitId, type TraitInfo } from './traits'
 import { View } from './view'
 import './style.css'
 
@@ -17,6 +18,8 @@ const SUBSTEPS = 3
 /** Biomass gained per particle absorbed. Lipids build membrane, so they're what really grows you. */
 const NUTRITION: Record<Kind, number> = { organic: 0.004, lipid: 0.05, mineral: 0.01 }
 const POPULATION_CHECK = 2
+/** Time runs at this fraction of normal speed while you choose an evolution. */
+const CHOICE_TIME_SCALE = 0.12
 /** Other cells get less out of each particle, so tiny ones stay tiny long enough to be prey. */
 const NPC_GROWTH = 0.35
 
@@ -38,6 +41,8 @@ let time = 0
 let startTime = 0
 let deathTime: number | null = null
 let populationTimer = 0
+let evolutions = 0
+let choosing = false
 const npcSteer: Steer = { x: 0, y: 0, mag: 0 }
 
 function reset() {
@@ -54,6 +59,8 @@ function reset() {
   startTime = time
   deathTime = null
   populationTimer = 0
+  evolutions = 0
+  closeChoice()
   for (let i = 0; i < tuning.grazers; i++) spawnCell('grazer', 300)
   for (let i = 0; i < tuning.engulfers; i++) spawnCell('engulfer', 600)
   view.x = player.cx
@@ -114,8 +121,7 @@ function simulate(dt: number) {
     let sy = 0
     let mag = 0
     if (cell === player) {
-      const s = input.read(view.sx(cell.cx), view.sy(cell.cy), cell.R * view.zoom)
-      ;({ x: sx, y: sy, mag } = s)
+      if (!choosing) ({ x: sx, y: sy, mag } = input.read(view.sx(cell.cx), view.sy(cell.cy), cell.R * view.zoom))
     } else if (!cell.engulfedBy) {
       ;({ x: sx, y: sy, mag } = think(cell, dt, cells, nutrients, npcSteer))
     }
@@ -125,8 +131,8 @@ function simulate(dt: number) {
     fluid.dragToward(cell.cx, cell.cy, cell.R * 1.05, cell.cvx, cell.cvy, tuning.wake)
     if (cell.thrust > 0) {
       fluid.push(
-        cell.cx - cell.steerX * cell.R * 1.3,
-        cell.cy - cell.steerY * cell.R * 1.3,
+        cell.jetX,
+        cell.jetY,
         cell.R * 0.9,
         -cell.steerX * cell.thrust * tuning.jet,
         -cell.steerY * cell.thrust * tuning.jet,
@@ -141,6 +147,7 @@ function simulate(dt: number) {
   nutrients.step(dt, fluid, vents, player.cx, player.cy)
   feed(dt)
   nutrients.sweep()
+  if (alive) checkEvolution()
   dust.step(dt, fluid)
   effects.step(dt)
   if (alive) maintainPopulation(dt)
@@ -264,6 +271,80 @@ function feed(dt: number) {
   }
 }
 
+function nextEvolutionCost() {
+  return EVOLUTION_COST[Math.min(evolutions, EVOLUTION_COST.length - 1)]
+}
+
+/** Traits the player could still evolve, in random order, at most three. */
+function evolutionOptions(): TraitInfo[] {
+  const open = Object.values(TRAITS).filter(t => !player.traits.has(t.id))
+  for (let i = open.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[open[i], open[j]] = [open[j], open[i]]
+  }
+  return open.slice(0, 3)
+}
+
+/** Debug: skip the mineral requirement. */
+function checkEvolutionNow() {
+  const options = evolutionOptions()
+  if (options.length && !choosing && deathTime === null) openChoice(options)
+}
+
+function checkEvolution() {
+  if (choosing || eaten.mineral < nextEvolutionCost()) return
+  const options = evolutionOptions()
+  if (options.length) openChoice(options)
+}
+
+/** Slow time and offer the evolution cards. */
+function openChoice(options: TraitInfo[]) {
+  choosing = true
+  input.release()
+  hud.cards.replaceChildren(
+    ...options.map((trait, i) => {
+      const card = document.createElement('button')
+      card.className = 'card'
+      card.innerHTML =
+        `<span class="icon">${TRAIT_ICONS[trait.id]}</span>` +
+        `<span class="name">${trait.name}</span>` +
+        `<span class="tagline">${trait.tagline}</span>` +
+        `<span class="detail">${trait.detail}</span>` +
+        `<span class="key">${i + 1}</span>`
+      card.addEventListener('click', () => choose(trait.id))
+      return card
+    }),
+  )
+  hud.evolve.classList.add('shown')
+}
+
+function closeChoice() {
+  choosing = false
+  hud.evolve.classList.remove('shown')
+}
+
+function choose(id: TraitId) {
+  if (!choosing) return
+  player.addTrait(id)
+  evolutions++
+  closeChoice()
+  input.release()
+  effects.ripple(player.cx, player.cy, player.palette.rim, 1.2)
+  updateHud()
+}
+
+const TRAIT_ICONS: Record<TraitId, string> = {
+  flagellum:
+    '<svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">' +
+    '<circle cx="40" cy="32" r="13"/><path d="M27 32c-4-6-7-6-10 0s-6 6-9 0-5-5-6-2"/></svg>',
+}
+
+window.addEventListener('keydown', e => {
+  if (!choosing) return
+  const card = hud.cards.children[Number(e.key) - 1] as HTMLButtonElement | undefined
+  card?.click()
+})
+
 function updateCamera(dt: number) {
   // Follow with a little lag and look-ahead, so speed reads as the cell drifting off-centre.
   const k = 1 - Math.exp(-4 * dt)
@@ -315,12 +396,15 @@ const hud = {
   death: document.querySelector<HTMLElement>('#death')!,
   deathCause: document.querySelector<HTMLElement>('#death .cause')!,
   deathStats: document.querySelector<HTMLElement>('#death .stats')!,
+  evolve: document.querySelector<HTMLElement>('#evolve')!,
+  cards: document.querySelector<HTMLElement>('#evolve .cards')!,
 }
 
 function updateHud() {
   hud.organic.textContent = String(eaten.organic)
   hud.lipid.textContent = String(eaten.lipid)
-  hud.mineral.textContent = String(eaten.mineral)
+  const more = Object.values(TRAITS).some(t => !player.traits.has(t.id))
+  hud.mineral.textContent = more ? `${eaten.mineral} / ${nextEvolutionCost()}` : String(eaten.mineral)
   hud.biomass.textContent = `×${player.biomass.toFixed(2)}`
 }
 
@@ -354,6 +438,10 @@ ecoFolder.add(tuning, 'engulfers', 0, 8, 1)
 ecoFolder.add(tuning, 'engulferSense', 50, 500).name('engulfer sense')
 ecoFolder.add(tuning, 'engulferStamina', 1, 20).name('engulfer stamina')
 ecoFolder.add(tuning, 'engulferLunge', 1, 6).name('engulfer lunge')
+const flagFolder = gui.addFolder('Flagellum')
+flagFolder.add(tuning, 'flagellumPower', 0, 5).name('power')
+flagFolder.add(tuning, 'flagellumTurn', 0, 800).name('turn')
+gui.add({ evolve: () => checkEvolutionNow() }, 'evolve').name('evolve now')
 gui.add(tuning, 'showFlow').name('show flow')
 gui.add({ reset }, 'reset')
 gui.close()
@@ -369,7 +457,7 @@ let fpsTime = 0
 function frame(now: number) {
   const elapsed = Math.min((now - last) / 1000, 0.1)
   last = now
-  acc += elapsed
+  acc += elapsed * (choosing ? CHOICE_TIME_SCALE : 1)
   let steps = 0
   while (acc >= STEP && steps < 3) {
     simulate(STEP)
@@ -403,6 +491,11 @@ if (import.meta.env.DEV) {
         return cells
       },
       /** Spawn a cell `dist` units to the right of the player. */
+      offerEvolution: checkEvolutionNow,
+      evolve(id: TraitId) {
+        player.addTrait(id)
+        updateHud()
+      },
       spawnNear(species: Species, biomass: number, dist = 120) {
         const cell = new Protocell(player.cx + dist, player.cy, biomass, species)
         cell.brain = newBrain()
