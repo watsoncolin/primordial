@@ -11,6 +11,8 @@ const KEYS: Record<string, [number, number]> = {
   arrowright: [1, 0],
 }
 
+const DOUBLE_TAP_MS = 300
+
 /** Touch/mouse: hold and drag anywhere; direction and strength come from where you hold relative to the cell. */
 export class Input {
   /** Steering result from the last read(): unit direction and 0..1 strength. */
@@ -18,12 +20,17 @@ export class Input {
   used = false
   private pointer: { x: number; y: number } | null = null
   private readonly keys = new Set<string>()
+  private lastTap = 0
+  private dashQueued = false
 
   constructor(canvas: HTMLCanvasElement) {
     canvas.addEventListener('pointerdown', e => {
       canvas.setPointerCapture(e.pointerId)
       this.pointer = { x: e.clientX, y: e.clientY }
       this.used = true
+      // A quick second tap is the touch equivalent of Space.
+      if (e.timeStamp - this.lastTap < DOUBLE_TAP_MS) this.dashQueued = true
+      this.lastTap = e.timeStamp
     })
     canvas.addEventListener('pointermove', e => {
       if (this.pointer) this.pointer = { x: e.clientX, y: e.clientY }
@@ -33,6 +40,10 @@ export class Input {
     window.addEventListener('keydown', e => {
       if (e.target instanceof HTMLInputElement) return
       const key = e.key.toLowerCase()
+      if (key === ' ' && !e.repeat) {
+        this.dashQueued = true
+        e.preventDefault()
+      }
       if (key in KEYS) {
         this.keys.add(key)
         this.used = true
@@ -50,6 +61,14 @@ export class Input {
   release() {
     this.pointer = null
     this.keys.clear()
+    this.dashQueued = false
+  }
+
+  /** True once per Space press or double-tap. */
+  takeDash() {
+    const queued = this.dashQueued
+    this.dashQueued = false
+    return queued
   }
 
   read(cellX: number, cellY: number, cellScreenR: number) {

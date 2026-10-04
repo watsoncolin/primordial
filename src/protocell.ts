@@ -7,6 +7,8 @@ import type { Kind } from './nutrients'
 import { radiusFor, scale } from './scale'
 import { glowSprite } from './sprites'
 import {
+  BURST_COOLDOWN,
+  BURST_SPEED,
   DIGEST_THRUST,
   DIGEST_TIME,
   ENGULF_RATIO,
@@ -131,6 +133,15 @@ export class Protocell {
   reach = 0
   /** Seconds of sluggish digestion left after swallowing a cell. */
   digest = 0
+  /** Body facing (rest angle 0), updated each step; a flagellum pushes this way. */
+  facingX = 1
+  facingY = 0
+  /** Burst jet recovery time left. */
+  dashCooldown = 0
+  /** Seconds before spikes can tear this cell again. */
+  spikeImmune = 0
+  /** Seconds alive, for idle animation. */
+  private age = 0
   /** Direction of the last applied thrust, and where it pushes on the water. */
   steerX = 0
   steerY = 0
@@ -216,6 +227,18 @@ export class Protocell {
     this.flash = 1
   }
 
+  /** Burst jet: one hard snap of the tail along the body's facing. Returns false while recovering. */
+  dash() {
+    if (!this.traits.has('burst') || this.dashCooldown > 0 || this.engulfedBy) return false
+    for (const p of this.pts) {
+      p.vx += this.facingX * BURST_SPEED
+      p.vy += this.facingY * BURST_SPEED
+    }
+    if (this.flagellum) this.flagellum.beat = 1.8
+    this.dashCooldown = BURST_COOLDOWN
+    return true
+  }
+
   /** How close prey's centre must come to be swallowed; pseudopods extend it toward the target. */
   get grabRadius() {
     return this.R * (1 + PSEUDOPOD_REACH * this.reach)
@@ -240,6 +263,7 @@ export class Protocell {
   /** `ix, iy` is a unit steering direction, `mag` its 0..1 strength. */
   step(dt: number, fluid: Fluid, ix: number, iy: number, mag: number, time: number, vents: Vent[]) {
     this.flash = Math.max(0, this.flash - dt * 2.5)
+    this.age += dt
     this.updateCentroid()
     const eater = this.engulfedBy
     if (eater) {
@@ -261,6 +285,11 @@ export class Protocell {
     if (thick && this.armor < 1) this.armor = Math.min(1, this.armor + dt / MEMBRANE_RESEAL)
     this.shielded = Math.max(0, this.shielded - dt)
     this.digest = Math.max(0, this.digest - dt)
+    this.spikeImmune = Math.max(0, this.spikeImmune - dt)
+    if (this.dashCooldown > 0) {
+      this.dashCooldown = Math.max(0, this.dashCooldown - dt)
+      if (this.dashCooldown === 0) this.flash = Math.max(this.flash, 0.5) // ready again
+    }
     this.reach += (this.reachWant - this.reach) * Math.min(1, dt * 5)
     if (this.traits.has('photosynthesis') && !eater) {
       // Light becomes biomass; it works best when the cell is still.
@@ -282,6 +311,8 @@ export class Protocell {
     const rot = Math.atan2(num, den)
     const cos = Math.cos(rot)
     const sin = Math.sin(rot)
+    this.facingX = cos
+    this.facingY = sin
 
     // Weak, rhythmic propulsion — a protocell squirms more than it swims.
     const pulse = 1 - tuning.pulse * (0.5 - 0.5 * Math.sin(time * tuning.pulseRate * TAU))
@@ -535,8 +566,12 @@ export class Protocell {
       // The giveaway glow that makes photosynthesisers easy to spot.
       Protocell.photoGlow ??= glowSprite(120, 240, 110)
       ctx.globalCompositeOperation = 'lighter'
-      ctx.globalAlpha = (0.2 + 0.06 * Math.sin(this.cx * 0.01 + this.engulfT + this.R)) * alpha
-      ctx.drawImage(Protocell.photoGlow, cx - R * 3, cy - R * 3, R * 6, R * 6)
+      // A lure pulses: slow, bright, hypnotic.
+      const lure = this.traits.has('lure')
+      const pulse = lure ? 0.32 + 0.18 * Math.sin(this.age * 2.2) : 0.2 + 0.05 * Math.sin(this.age * 1.3)
+      const size = R * (lure ? 7 : 6)
+      ctx.globalAlpha = pulse * alpha
+      ctx.drawImage(Protocell.photoGlow, cx - size / 2, cy - size / 2, size, size)
       ctx.globalAlpha = alpha
       ctx.globalCompositeOperation = 'source-over'
     }
@@ -579,6 +614,24 @@ export class Protocell {
       ctx.strokeStyle = `rgba(${pal.rim},${0.3 * this.armor + 0.1})`
       ctx.stroke(path)
       ctx.restore()
+    }
+
+    if (this.traits.has('spikes')) {
+      // Barbs along the outward normal of every other membrane point.
+      ctx.beginPath()
+      for (let i = 0; i < POINTS; i += 2) {
+        const dx = sx[i] - cx
+        const dy = sy[i] - cy
+        const d = Math.hypot(dx, dy) || 1
+        const nx = dx / d
+        const ny = dy / d
+        const w = R * 0.07
+        ctx.moveTo(sx[i] - ny * w, sy[i] + nx * w)
+        ctx.lineTo(sx[i] + nx * R * 0.24, sy[i] + ny * R * 0.24)
+        ctx.lineTo(sx[i] + ny * w, sy[i] - nx * w)
+      }
+      ctx.fillStyle = `rgba(${pal.rim},0.85)`
+      ctx.fill()
     }
 
     // Specular highlight.

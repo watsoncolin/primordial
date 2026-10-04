@@ -68,7 +68,7 @@ export class Nutrients {
     this.recount()
   }
 
-  spawn(kind: Kind, x: number, y: number, vx = 0, vy = 0, grace = 0) {
+  spawn(kind: Kind, x: number, y: number, vx = 0, vy = 0, grace = 0, value = NUTRITION[kind] * scale.biomass) {
     const r = kind === 'organic' ? rand(1.2, 2.2) : kind === 'lipid' ? rand(2.5, 4.5) : rand(2.2, 3.8)
     this.items.push({
       kind,
@@ -83,7 +83,7 @@ export class Nutrients {
       sides: Math.random() < 0.5 ? 5 : 6,
       dead: false,
       grace,
-      value: NUTRITION[kind] * scale.biomass,
+      value,
       fading: false,
       alpha: 1,
     })

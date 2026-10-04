@@ -2,7 +2,8 @@
  * Evolutionary traits. Each one physically changes the organism (propulsion, collisions, senses…)
  * rather than tweaking a stat; the behaviour lives with the body part it creates.
  */
-export type TraitId = 'flagellum' | 'membrane' | 'engulfing' | 'photosynthesis'
+export type TraitId =
+  'flagellum' | 'membrane' | 'engulfing' | 'photosynthesis' | 'chemoreception' | 'burst' | 'spikes' | 'tendril' | 'lure'
 
 export interface TraitInfo {
   id: TraitId
@@ -11,6 +12,8 @@ export interface TraitInfo {
   tagline: string
   /** What actually changes, in plain terms. */
   detail: string
+  /** The adaptation this one evolves from. */
+  requires?: TraitId
 }
 
 export const TRAITS: Record<TraitId, TraitInfo> = {
@@ -41,6 +44,45 @@ export const TRAITS: Record<TraitId, TraitInfo> = {
     detail:
       'Grow slowly on your own, twice as fast while holding still. But you glow, and predators notice you from much farther away.',
   },
+  chemoreception: {
+    id: 'chemoreception',
+    name: 'Chemoreception',
+    tagline: 'You can taste the water.',
+    detail: 'Faint traces at the edge of your vision point toward food clouds and mineral vents you can’t see yet.',
+  },
+  burst: {
+    id: 'burst',
+    name: 'Burst Jet',
+    tagline: 'One violent snap of the tail.',
+    detail: 'Press Space or double-tap to lunge forward. Takes a few seconds to recover.',
+    requires: 'flagellum',
+  },
+  spikes: {
+    id: 'spikes',
+    name: 'Spikes',
+    tagline: 'Your membrane hardens into barbs.',
+    detail: 'Ram cells too big to swallow and knock chunks of biomass off them. Anything that grabs you gets torn too.',
+    requires: 'membrane',
+  },
+  tendril: {
+    id: 'tendril',
+    name: 'Tendril',
+    tagline: 'A long, sticky arm of membrane.',
+    detail: 'Reach for prey much farther away and reel it in toward you.',
+    requires: 'engulfing',
+  },
+  lure: {
+    id: 'lure',
+    name: 'Bioluminescent Lure',
+    tagline: 'Your glow becomes a trap.',
+    detail: 'Small cells are drawn to your light instead of fleeing from it.',
+    requires: 'photosynthesis',
+  },
+}
+
+/** Traits a cell with `has` could evolve next: not taken yet, prerequisites met. */
+export function availableTraits(has: Set<TraitId>) {
+  return Object.values(TRAITS).filter(t => !has.has(t.id) && (!t.requires || has.has(t.requires)))
 }
 
 // Trait tuning. Kept here so each trait's numbers sit next to its description.
@@ -66,4 +108,18 @@ export const PHOTO_STILL_BONUS = 2
 export const PHOTO_CONSPICUOUS = 1.6
 
 /** Minerals needed for each successive evolution. */
-export const EVOLUTION_COST = [8, 20, 36, 56]
+export const EVOLUTION_COST = [8, 20, 36, 56, 80, 110, 150, 200, 260]
+/** Burst jet: speed added along your facing, and seconds before you can do it again. */
+export const BURST_SPEED = 150
+export const BURST_COOLDOWN = 3
+/** Spikes: minimum closing speed for a hit to tear, the biomass fraction a full-speed hit knocks off, and per-victim recovery. */
+export const SPIKE_MIN_SPEED = 30
+export const SPIKE_FULL_SPEED = 120
+export const SPIKE_BITE = 0.15
+export const SPIKE_RECOVERY = 0.6
+/** Tendril: how far it reaches (gap beyond the membrane, in radii) and how hard it reels prey in. */
+export const TENDRIL_RANGE = 4
+export const TENDRIL_PULL = 150
+/** Lure: how far away small cells are drawn in, and how hard they swim toward the light. */
+export const LURE_RANGE = 320
+export const LURE_EFFORT = 0.55

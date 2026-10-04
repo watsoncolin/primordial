@@ -9,9 +9,22 @@ import { clamp, rand, wrapCoord, wrapDelta } from './math'
 import { type Kind, Nutrients } from './nutrients'
 import { NUTRIENT_RGB, Protocell, type Species } from './protocell'
 import { type Vent, placeVents } from './vents'
-import { EVOLUTION_COST, TRAITS, type TraitId, type TraitInfo } from './traits'
+import {
+  EVOLUTION_COST,
+  SPIKE_BITE,
+  SPIKE_FULL_SPEED,
+  SPIKE_MIN_SPEED,
+  SPIKE_RECOVERY,
+  TENDRIL_PULL,
+  TENDRIL_RANGE,
+  TRAITS,
+  type TraitId,
+  type TraitInfo,
+  availableTraits,
+} from './traits'
 import { needsRescale, rescaleWorld } from './rescale'
 import { scale } from './scale'
+import { Senses } from './senses'
 import { View } from './view'
 
 const STEP = 1 / 60
@@ -34,6 +47,7 @@ let nutrients: Nutrients
 let vents: Vent[]
 let dust: Dust
 let effects: Effects
+let senses: Senses
 let eaten: Record<Kind, number>
 let cellsEaten = 0
 let time = 0
@@ -54,6 +68,7 @@ function reset() {
   nutrients.seed(player.cx, player.cy, vents)
   dust = new Dust()
   effects = new Effects()
+  senses = new Senses()
   eaten = { organic: 0, lipid: 0, mineral: 0 }
   cellsEaten = 0
   startTime = time
@@ -114,7 +129,12 @@ function targetZoom() {
 function simulate(dt: number) {
   time += dt
   const alive = deathTime === null
-  if (alive) aimPseudopod(player)
+  if (alive) aimPseudopod(player, dt)
+  if (input.takeDash() && alive && !choosing && player.dash()) {
+    // The tail's snap throws a slug of water backwards.
+    fluid.push(player.jetX, player.jetY, player.R * 1.3, -player.facingX * 2500, -player.facingY * 2500)
+    effects.ripple(player.jetX, player.jetY, player.palette.rim, 0.6)
+  }
 
   for (const cell of cells) {
     if (cell.gone) continue
@@ -148,6 +168,7 @@ function simulate(dt: number) {
   nutrients.step(dt, fluid, vents, player.cx, player.cy)
   feed(dt)
   nutrients.sweep()
+  if (alive && player.traits.has('chemoreception')) senses.update(dt, player.cx, player.cy, nutrients, vents)
   if (alive) checkEvolution()
   if (alive && needsRescale(player)) {
     const k = rescaleWorld(player, cells, nutrients, vents, fluid, effects)
@@ -184,6 +205,12 @@ function interact() {
       } else if (d < a.R + b.R) {
         a.pushOutOf(b)
         b.pushOutOf(a)
+        // Spikes tear whatever they ram (or get rammed by) hard enough.
+        const nx = dx / (d || 1)
+        const ny = dy / (d || 1)
+        const closing = (a.cvx - b.cvx) * nx + (a.cvy - b.cvy) * ny
+        if (a.traits.has('spikes')) tear(b, a, closing)
+        if (b.traits.has('spikes')) tear(a, b, closing)
       }
     }
   }
@@ -195,6 +222,8 @@ function interact() {
 }
 
 function eat(eater: Protocell, prey: Protocell) {
+  // Grabbing something spiky costs you, whether or not you get it down.
+  if (prey.traits.has('spikes')) tear(eater, prey, SPIKE_FULL_SPEED)
   if (prey.armor >= 1) {
     repel(eater, prey)
     return
@@ -209,6 +238,46 @@ function eat(eater: Protocell, prey: Protocell) {
     cellsEaten++
     updateHud()
   }
+}
+
+/** Spikes: knock a chunk of biomass off `victim`; it sprays out as food. */
+function tear(victim: Protocell, spiky: Protocell, speed: number) {
+  if (speed < SPIKE_MIN_SPEED || victim.spikeImmune > 0 || victim.engulfedBy) return
+  victim.spikeImmune = SPIKE_RECOVERY
+  const lost = victim.biomass * SPIKE_BITE * Math.min(1, speed / SPIKE_FULL_SPEED)
+  victim.grow(-lost)
+  // Spray from the side that was hit.
+  const dx = wrapDelta(spiky.cx - victim.cx, WORLD)
+  const dy = wrapDelta(spiky.cy - victim.cy, WORLD)
+  const d = Math.hypot(dx, dy) || 1
+  const hitX = victim.cx + (dx / d) * victim.R
+  const hitY = victim.cy + (dy / d) * victim.R
+  const count = 6 + Math.round(Math.min(1, speed / SPIKE_FULL_SPEED) * 8)
+  const base = Math.atan2(-dy, -dx)
+  for (let i = 0; i < count; i++) {
+    const a = base + Math.PI / 2 + rand(-1.2, 1.2) * (Math.random() < 0.5 ? 1 : -1)
+    const v = rand(30, 90)
+    nutrients.spawn(
+      i % 4 === 0 ? 'lipid' : 'organic',
+      hitX,
+      hitY,
+      victim.cvx + Math.cos(a) * v,
+      victim.cvy + Math.sin(a) * v,
+      0.25,
+      (lost * 0.9) / count,
+    )
+  }
+  for (let i = 0; i < 4; i++) {
+    const a = base + rand(-1, 1)
+    effects.shard(hitX, hitY, Math.cos(a) * 50, Math.sin(a) * 50, a, victim.R * 0.25, victim.palette.rim)
+  }
+  effects.ripple(hitX, hitY, victim.palette.rim, 0.5)
+  // Getting torn makes a predator back off for a moment.
+  if (victim.brain) {
+    victim.brain.lunge = 0
+    victim.brain.rest = Math.max(victim.brain.rest, 1.5)
+  }
+  if (victim === player) updateHud()
 }
 
 /** A thick membrane holds: the attacker is thrown back and the membrane cracks. */
@@ -243,10 +312,14 @@ function repel(eater: Protocell, prey: Protocell) {
 }
 
 /** Engulfing: point the pseudopod at the nearest cell the player could swallow. */
-function aimPseudopod(cell: Protocell) {
+let tendrilTarget: Protocell | null = null
+
+function aimPseudopod(cell: Protocell, dt: number) {
+  tendrilTarget = null
   if (!cell.traits.has('engulfing')) return
+  const tendril = cell.traits.has('tendril')
   let best: Protocell | null = null
-  let bestGap = cell.R * 2
+  let bestGap = cell.R * (tendril ? TENDRIL_RANGE : 2)
   for (const other of cells) {
     if (other === cell || other.gone || other.engulfedBy || !cell.canEat(other)) continue
     const gap = Math.hypot(wrapDelta(other.cx - cell.cx, WORLD), wrapDelta(other.cy - cell.cy, WORLD)) - cell.R
@@ -262,7 +335,46 @@ function aimPseudopod(cell: Protocell) {
     const d = Math.hypot(dx, dy) || 1
     cell.reachDirX = dx / d
     cell.reachDirY = dy / d
+    if (tendril && cell.reach > 0.5) {
+      // Reel the prey in. It still swims against the pull, so a strong cell can break free.
+      tendrilTarget = best
+      for (const p of best.pts) {
+        p.vx -= (dx / d) * TENDRIL_PULL * dt
+        p.vy -= (dy / d) * TENDRIL_PULL * dt
+      }
+    }
   }
+}
+
+/** The tendril: a wavering strand from the membrane to whatever it's holding. */
+function drawTendril() {
+  const prey = tendrilTarget
+  if (!prey || player.gone) return
+  const z = view.zoom
+  const px = view.sx(player.cx)
+  const py = view.sy(player.cy)
+  const dx = wrapDelta(prey.cx - player.cx, WORLD) * z
+  const dy = wrapDelta(prey.cy - player.cy, WORLD) * z
+  const d = Math.hypot(dx, dy) || 1
+  const ux = dx / d
+  const uy = dy / d
+  const start = player.grabRadius * z * 0.95
+  const end = d - prey.R * z * 0.8
+  if (end <= start) return
+  const sway = Math.sin(time * 6) * (end - start) * 0.12
+  const mx = px + ux * (start + end) * 0.5 - uy * sway
+  const my = py + uy * (start + end) * 0.5 + ux * sway
+  ctx.beginPath()
+  ctx.moveTo(px + ux * start, py + uy * start)
+  ctx.quadraticCurveTo(mx, my, px + ux * end, py + uy * end)
+  ctx.lineCap = 'round'
+  ctx.lineWidth = Math.max(1.5, player.R * z * 0.09)
+  ctx.strokeStyle = `rgba(${player.palette.rim},0.55)`
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.arc(px + ux * end, py + uy * end, Math.max(2, player.R * z * 0.1), 0, Math.PI * 2)
+  ctx.fillStyle = `rgba(${player.palette.rim},0.7)`
+  ctx.fill()
 }
 
 /** The player's death: the membrane tears and its contents spray into the water for others to eat. */
@@ -344,7 +456,7 @@ function nextEvolutionCost() {
 
 /** Traits the player could still evolve, in random order, at most three. */
 function evolutionOptions(): TraitInfo[] {
-  const open = Object.values(TRAITS).filter(t => !player.traits.has(t.id))
+  const open = availableTraits(player.traits)
   for (let i = open.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1))
     ;[open[i], open[j]] = [open[j], open[i]]
@@ -375,6 +487,7 @@ function openChoice(options: TraitInfo[]) {
       card.innerHTML =
         `<span class="icon">${TRAIT_ICONS[trait.id]}</span>` +
         `<span class="name">${trait.name}</span>` +
+        (trait.requires ? `<span class="lineage">evolves from ${TRAITS[trait.requires].name}</span>` : '') +
         `<span class="tagline">${trait.tagline}</span>` +
         `<span class="detail">${trait.detail}</span>` +
         `<span class="key">${i + 1}</span>`
@@ -404,6 +517,29 @@ const svg = (body: string) =>
   `<svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">${body}</svg>`
 
 const TRAIT_ICONS: Record<TraitId, string> = {
+  chemoreception: svg(
+    '<circle cx="26" cy="32" r="12"/><path d="M42 24c4 2 4 14 0 16M48 19c7 4 7 22 0 26M54 14c9 6 9 30 0 36" stroke-width="2"/>',
+  ),
+  burst: svg(
+    '<circle cx="42" cy="32" r="11"/><path d="M30 32c-3-5-6-5-8 0s-5 5-7 0"/><path d="M14 22l-6-4M12 32H4M14 42l-6 4" stroke-width="2"/>',
+  ),
+  spikes: svg(
+    '<circle cx="32" cy="32" r="13"/>' +
+      [0, 45, 90, 135, 180, 225, 270, 315]
+        .map(a => {
+          const r = (a * Math.PI) / 180
+          const p = (d: number) => `${(32 + Math.cos(r) * d).toFixed(1)} ${(32 + Math.sin(r) * d).toFixed(1)}`
+          return `<path d="M${p(13)}L${p(22)}"/>`
+        })
+        .join(''),
+  ),
+  tendril: svg(
+    '<circle cx="20" cy="32" r="11"/><path d="M31 30c8-6 12 6 20 0 3-2 5-3 7-1"/><circle cx="56" cy="27" r="3"/>',
+  ),
+  lure: svg(
+    '<circle cx="32" cy="32" r="10"/><circle cx="32" cy="32" r="17" stroke-width="1.2" stroke-dasharray="2 4"/>' +
+      '<circle cx="54" cy="18" r="3"/><circle cx="10" cy="46" r="2.5"/><path d="M50 21l-6 4M13 44l6-3" stroke-width="1.5"/>',
+  ),
   membrane: svg('<circle cx="32" cy="32" r="18"/><circle cx="32" cy="32" r="13" stroke-width="1.5"/>'),
   engulfing: svg(
     '<path d="M22 20c8-6 18-4 20 4 2 5 9 4 12 8s-3 9-10 8c-4 9-17 10-23 3s-8-17 1-23z"/><circle cx="54" cy="31" r="3"/>',
@@ -458,9 +594,11 @@ function render() {
   for (const cell of cells) if (!cell.engulfedBy && cell !== player) cell.draw(ctx, view)
   if (!player.gone) player.draw(ctx, view)
   for (const cell of cells) if (cell.engulfedBy) cell.draw(ctx, view)
+  drawTendril()
   effects.draw(ctx, view)
   ctx.fillStyle = vignette
   ctx.fillRect(0, 0, view.w, view.h)
+  if (deathTime === null && player.traits.has('chemoreception')) senses.draw(ctx, view, time)
 }
 
 // HUD
@@ -481,7 +619,7 @@ const hud = {
 function updateHud() {
   hud.organic.textContent = String(eaten.organic)
   hud.lipid.textContent = String(eaten.lipid)
-  const more = Object.values(TRAITS).some(t => !player.traits.has(t.id))
+  const more = availableTraits(player.traits).length > 0
   hud.mineral.textContent = more ? `${eaten.mineral} / ${nextEvolutionCost()}` : String(eaten.mineral)
   hud.biomass.textContent = `×${player.biomass.toFixed(2)}`
 }

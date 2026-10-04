@@ -58,3 +58,53 @@ for (const still of [true, false]) {
   }
   console.log(`membrane: reseals in ${t.toFixed(1)}s (expected ${MEMBRANE_RESEAL}s)`)
 }
+
+// Burst jet: peak speed right after a dash from cruising, and the cooldown.
+{
+  const c = new Protocell(500, 500, 1, 'player')
+  c.addTrait('flagellum')
+  c.addTrait('burst')
+  sim([c], 4, () => [1, 0, 1])
+  const cruise = Math.hypot(c.cvx, c.cvy)
+  c.dash()
+  sim([c], 0.1, () => [1, 0, 1])
+  const peak = Math.hypot(c.cvx, c.cvy)
+  const again = c.dash()
+  sim([c], 1.5, () => [1, 0, 1])
+  console.log(
+    `burst: cruise ${cruise.toFixed(0)} → ${peak.toFixed(0)} right after dash, back to ${Math.hypot(c.cvx, c.cvy).toFixed(0)} after 1.5s; immediate re-dash allowed? ${again}`,
+  )
+}
+
+// Lure: a small grazer near a hungry cell flees normally, but drifts toward a lure-bearer.
+{
+  const { newBrain, think } = await import('../src/ai.ts')
+  const { Nutrients } = await import('../src/nutrients.ts')
+  for (const withLure of [false, true]) {
+    const hunter = new Protocell(500, 500, 1, 'player')
+    if (withLure) {
+      hunter.addTrait('photosynthesis')
+      hunter.addTrait('lure')
+    }
+    const g = new Protocell(600, 500, 0.3, 'grazer')
+    g.brain = newBrain()
+    const cells = [hunter, g]
+    const nut = new Nutrients()
+    const out = { x: 0, y: 0, mag: 0 }
+    const f = new Fluid()
+    let t = 0
+    for (let s = 0; s < 4 * 60; s++) {
+      t += 1 / 60
+      const st = think(g, 1 / 60, cells, nut, out)
+      for (let i = 0; i < 3; i++) {
+        hunter.step(1 / 180, f, 0, 0, 0, t, [])
+        g.step(1 / 180, f, st.x, st.y, st.mag, t, [])
+      }
+      f.step(1 / 60, t)
+    }
+    const gap = Math.hypot(g.cx - hunter.cx, g.cy - hunter.cy) - hunter.R - g.R
+    console.log(
+      `lure ${withLure ? 'on ' : 'off'}: grazer started 100 away (centre to centre), gap after 4s ${gap.toFixed(0)}`,
+    )
+  }
+}

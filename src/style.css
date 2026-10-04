@@ -243,3 +243,11 @@ body {
   font-size: 10px;
   opacity: 0.4;
 }
+
+.card .lineage {
+  margin-top: -4px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(175, 255, 235, 0.6);
+}

@@ -2,6 +2,7 @@ import { WORLD, tuning } from './config'
 import { TAU, rand, wrapDelta } from './math'
 import type { Nutrient, Nutrients } from './nutrients'
 import type { Protocell } from './protocell'
+import { LURE_EFFORT, LURE_RANGE } from './traits'
 
 const RETARGET = 0.4
 const GRAZER_SENSE = 260
@@ -59,6 +60,15 @@ export function think(cell: Protocell, dt: number, cells: Protocell[], nutrients
   brain.lunge = Math.max(0, brain.lunge - dt)
   brain.lungeCooldown = Math.max(0, brain.lungeCooldown - dt)
   cell.boost = brain.lunge > 0 ? tuning.engulferLunge : 1
+
+  // A bioluminescent lure that could eat this cell mesmerises it: no fear, just a drift toward the light.
+  const lure = nearestCell(cell, cells, LURE_RANGE, other => other.traits.has('lure') && other.canEat(cell))
+  if (lure) {
+    steerAt(cell, lure.cx, lure.cy, 1, out)
+    out.mag = LURE_EFFORT
+    brain.prey = null
+    return out
+  }
 
   const threat = nearestCell(cell, cells, FLEE_SENSE + cell.R, other => other.canEat(cell))
   brain.exhausted = Math.max(0, brain.exhausted - dt)
