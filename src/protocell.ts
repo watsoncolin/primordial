@@ -116,6 +116,8 @@ export class Protocell {
   engulfT = 0
   /** Fully absorbed (or ruptured); remove from the world. */
   gone = false
+  /** One of the player's cells during the Great Transition. */
+  colony = false
   brain: Brain | null = null
   /** Temporary thrust multiplier (an engulfer's lunge). */
   boost = 1
@@ -245,6 +247,11 @@ export class Protocell {
   }
 
   /** Multiplier on how far away predators notice this cell. */
+  /** Colony cells sit close together, so their glows are dimmed to keep the stack from blowing out. */
+  private get glowScale() {
+    return this.colony ? 0.3 : 1
+  }
+
   get conspicuous() {
     return this.traits.has('photosynthesis') ? PHOTO_CONSPICUOUS : 1
   }
@@ -556,7 +563,7 @@ export class Protocell {
 
     if (this.aura) {
       ctx.globalCompositeOperation = 'lighter'
-      ctx.globalAlpha = (0.22 + this.flash * 0.15) * alpha
+      ctx.globalAlpha = (0.22 + this.flash * 0.15) * alpha * this.glowScale
       ctx.drawImage(this.aura, cx - R * 2.4, cy - R * 2.4, R * 4.8, R * 4.8)
       ctx.globalAlpha = alpha
       ctx.globalCompositeOperation = 'source-over'
@@ -570,7 +577,7 @@ export class Protocell {
       const lure = this.traits.has('lure')
       const pulse = lure ? 0.32 + 0.18 * Math.sin(this.age * 2.2) : 0.2 + 0.05 * Math.sin(this.age * 1.3)
       const size = R * (lure ? 7 : 6)
-      ctx.globalAlpha = pulse * alpha
+      ctx.globalAlpha = pulse * alpha * this.glowScale
       ctx.drawImage(Protocell.photoGlow, cx - size / 2, cy - size / 2, size, size)
       ctx.globalAlpha = alpha
       ctx.globalCompositeOperation = 'source-over'

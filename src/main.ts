@@ -5,7 +5,7 @@ import { Dust } from './dust'
 import { Effects } from './effects'
 import { Fluid } from './fluid'
 import { Input } from './input'
-import { clamp, rand, wrapCoord, wrapDelta } from './math'
+import { TAU, clamp, rand, wrapCoord, wrapDelta } from './math'
 import { type Kind, Nutrients } from './nutrients'
 import { NUTRIENT_RGB, Protocell, type Species } from './protocell'
 import { type Vent, placeVents } from './vents'
@@ -25,6 +25,19 @@ import {
 import { needsRescale, rescaleWorld } from './rescale'
 import { scale } from './scale'
 import { Senses } from './senses'
+import {
+  ASSEMBLY_TIME,
+  COLONY_CELLS,
+  COLONY_SHARE,
+  type Lineage,
+  MIN_SURVIVORS,
+  TRANSITION_BIOMASS,
+  TRANSITION_EVOLUTIONS,
+  TRANSITION_TIME,
+  formationOffsets,
+  lineageFor,
+  recordLineage,
+} from './transition'
 import { View } from './view'
 
 const STEP = 1 / 60
@@ -56,6 +69,60 @@ let deathTime: number | null = null
 let populationTimer = 0
 let evolutions = 0
 let choosing = false
+/**
+ * Run phase. 'living' is the normal game; 'colony' is the Great Transition's survival minute;
+ * 'assembling' pulls the survivors into formation; 'complete' shows the new lineage.
+ */
+type Phase = 'living' | 'colony' | 'assembling' | 'complete'
+let phase: Phase = 'living'
+let confirming = false
+let colony: Protocell[] = []
+let phaseTime = 0
+let lineage: Lineage | null = null
+/** Formation slot (in cell radii) for each colony cell once assembling. */
+const slots = new Map<Protocell, [number, number]>()
+let formationAngle = 0
+/** Where the camera last focused, so it can rest there if everything dies. */
+const focus = { x: 0, y: 0, vx: 0, vy: 0, r: 0, spread: 0 }
+
+/** What the camera follows: the player, or the centre of the colony. */
+function updateFocus() {
+  if (phase === 'living') {
+    focus.x = player.cx
+    focus.y = player.cy
+    focus.vx = player.cvx
+    focus.vy = player.cvy
+    focus.r = player.R
+    focus.spread = player.R
+    return
+  }
+  if (!colony.length) return
+  // Average positions relative to the first cell so the centre is right across the world's seam.
+  const ref = colony[0]
+  let x = 0
+  let y = 0
+  let vx = 0
+  let vy = 0
+  let r = 0
+  for (const c of colony) {
+    x += wrapDelta(c.cx - ref.cx, WORLD)
+    y += wrapDelta(c.cy - ref.cy, WORLD)
+    vx += c.cvx
+    vy += c.cvy
+    r += c.R
+  }
+  const n = colony.length
+  focus.x = wrapCoord(ref.cx + x / n, WORLD)
+  focus.y = wrapCoord(ref.cy + y / n, WORLD)
+  focus.vx = vx / n
+  focus.vy = vy / n
+  focus.r = r / n
+  let spread = 0
+  for (const c of colony) {
+    spread = Math.max(spread, Math.hypot(wrapDelta(c.cx - focus.x, WORLD), wrapDelta(c.cy - focus.y, WORLD)) + c.R)
+  }
+  focus.spread = spread
+}
 const npcSteer: Steer = { x: 0, y: 0, mag: 0 }
 
 function reset() {
@@ -76,8 +143,18 @@ function reset() {
   populationTimer = 0
   evolutions = 0
   closeChoice()
+  phase = 'living'
+  confirming = false
+  colony = []
+  slots.clear()
+  lineage = null
+  hud.prompt.classList.remove('shown')
+  hud.lineage.classList.remove('shown')
+  hud.banner.classList.remove('shown')
+  hud.deathTitle.textContent = 'Membrane ruptured'
   for (let i = 0; i < tuning.grazers; i++) spawnCell('grazer', 300)
   for (let i = 0; i < tuning.engulfers; i++) spawnCell('engulfer', 600)
+  updateFocus()
   view.x = player.cx
   view.y = player.cy
   view.zoom = targetZoom()
@@ -93,7 +170,7 @@ function spawnCell(species: Species, minDist: number) {
   for (let tries = 0; tries < 20; tries++) {
     x = rand(0, WORLD)
     y = rand(0, WORLD)
-    const far = Math.hypot(wrapDelta(x - player.cx, WORLD), wrapDelta(y - player.cy, WORLD)) > minDist
+    const far = Math.hypot(wrapDelta(x - focus.x, WORLD), wrapDelta(y - focus.y, WORLD)) > minDist
     const clear = vents.every(v => Math.hypot(wrapDelta(x - v.x, WORLD), wrapDelta(y - v.y, WORLD)) > v.r * 3)
     if (far && clear) break
   }
@@ -108,7 +185,9 @@ function maintainPopulation(dt: number) {
   populationTimer = POPULATION_CHECK
   const alive = (s: Species) => cells.filter(c => c.species === s && !c.engulfedBy).length
   if (alive('grazer') < tuning.grazers) spawnCell('grazer', 450)
-  if (alive('engulfer') < tuning.engulfers) spawnCell('engulfer', 600)
+  // Dividing draws a crowd: extra predators while the colony is vulnerable.
+  const engulfers = tuning.engulfers + (phase === 'colony' ? 2 : 0)
+  if (alive('engulfer') < engulfers) spawnCell('engulfer', phase === 'colony' ? 450 : 600)
 }
 
 /** Keep the player a constant size on screen; the world shrinks as it grows. */
@@ -123,18 +202,33 @@ function screenRadius() {
  */
 function targetZoom() {
   const minZoom = Math.max(view.w, view.h) / (WORLD * 0.9)
-  return Math.max(screenRadius() / player.R, minZoom)
+  if (phase === 'living') return Math.max(screenRadius() / player.R, minZoom)
+  // The colony: small cells shown at a readable size, but always the whole group in frame.
+  const cellZoom = (screenRadius() * 0.45) / Math.max(1, focus.r)
+  const fitZoom = (Math.min(view.w, view.h) * 0.36) / Math.max(1, focus.spread)
+  const z = Math.min(cellZoom, fitZoom)
+  return Math.max(phase === 'complete' ? z * 0.8 : z, minZoom)
 }
 
 function simulate(dt: number) {
   time += dt
   const alive = deathTime === null
-  if (alive) aimPseudopod(player, dt)
-  if (input.takeDash() && alive && !choosing && player.dash()) {
-    // The tail's snap throws a slug of water backwards.
-    fluid.push(player.jetX, player.jetY, player.R * 1.3, -player.facingX * 2500, -player.facingY * 2500)
-    effects.ripple(player.jetX, player.jetY, player.palette.rim, 0.6)
+  const living = alive && phase === 'living'
+  if (living) aimPseudopod(player, dt)
+  if (input.takeDash() && alive && !choosing && !confirming) {
+    for (const c of phase === 'living' ? [player] : phase === 'colony' ? colony : []) {
+      // The tail's snap throws a slug of water backwards.
+      if (!c.dash()) continue
+      fluid.push(c.jetX, c.jetY, c.R * 1.3, -c.facingX * 2500, -c.facingY * 2500)
+      effects.ripple(c.jetX, c.jetY, c.palette.rim, 0.6)
+    }
   }
+  updateFocus()
+  const colonySteer =
+    phase === 'colony' && !confirming
+      ? input.read(view.sx(focus.x), view.sy(focus.y), focus.r * view.zoom * 2)
+      : { x: 0, y: 0, mag: 0 }
+  if (phase === 'assembling' || phase === 'complete') holdFormation(dt)
 
   for (const cell of cells) {
     if (cell.gone) continue
@@ -142,7 +236,10 @@ function simulate(dt: number) {
     let sy = 0
     let mag = 0
     if (cell === player) {
-      if (!choosing) ({ x: sx, y: sy, mag } = input.read(view.sx(cell.cx), view.sy(cell.cy), cell.R * view.zoom))
+      if (!choosing && !confirming)
+        ({ x: sx, y: sy, mag } = input.read(view.sx(cell.cx), view.sy(cell.cy), cell.R * view.zoom))
+    } else if (cell.colony) {
+      if (phase === 'colony' && !cell.engulfedBy) ({ x: sx, y: sy, mag } = flock(cell, colonySteer))
     } else if (!cell.engulfedBy) {
       ;({ x: sx, y: sy, mag } = think(cell, dt, cells, nutrients, npcSteer))
     }
@@ -165,12 +262,13 @@ function simulate(dt: number) {
   for (const vent of vents) vent.step(dt, fluid, nutrients)
   fluid.step(dt, time)
 
-  nutrients.step(dt, fluid, vents, player.cx, player.cy)
+  nutrients.step(dt, fluid, vents, focus.x, focus.y)
   feed(dt)
   nutrients.sweep()
-  if (alive && player.traits.has('chemoreception')) senses.update(dt, player.cx, player.cy, nutrients, vents)
-  if (alive) checkEvolution()
-  if (alive && needsRescale(player)) {
+  if (alive && player.traits.has('chemoreception')) senses.update(dt, focus.x, focus.y, nutrients, vents)
+  if (living) checkEvolution()
+  if (alive) advanceTransition(dt)
+  if (living && needsRescale(player)) {
     const k = rescaleWorld(player, cells, nutrients, vents, fluid, effects)
     // Everything just shrank by k around the player; zoom in by the same amount so the screen doesn't change.
     view.zoom /= k
@@ -190,6 +288,9 @@ function interact() {
     for (let j = i + 1; j < cells.length; j++) {
       const b = cells[j]
       if (b.engulfedBy || b.gone) continue
+      // The colony's own cells never eat each other, and once it binds, nothing eats them.
+      const safe =
+        (a.colony && b.colony) || ((a.colony || b.colony) && (phase === 'assembling' || phase === 'complete'))
       const dx = wrapDelta(b.cx - a.cx, WORLD)
       const dy = wrapDelta(b.cy - a.cy, WORLD)
       const reach = Math.max(a.grabRadius, a.R) + Math.max(b.grabRadius, b.R)
@@ -198,9 +299,9 @@ function interact() {
       if (d > reach) continue
       // Swallowing starts once the prey's centre reaches the membrane (or a pseudopod); the engulf
       // pulls it the rest of the way. A freshly cracked thick membrane just bounces.
-      if (a.canEat(b) && b.shielded <= 0) {
+      if (!safe && a.canEat(b) && b.shielded <= 0) {
         if (d < a.grabRadius) eat(a, b)
-      } else if (b.canEat(a) && a.shielded <= 0) {
+      } else if (!safe && b.canEat(a) && a.shielded <= 0) {
         if (d < b.grabRadius) eat(b, a)
       } else if (d < a.R + b.R) {
         a.pushOutOf(b)
@@ -219,6 +320,7 @@ function interact() {
     if (cell.gone && cell.engulfedBy && !cell.engulfedBy.gone) cell.engulfedBy.ingestCell(cell)
   }
   cells = cells.filter(c => !c.gone || c === player)
+  colony = colony.filter(c => !c.gone && !c.engulfedBy)
 }
 
 function eat(eater: Protocell, prey: Protocell) {
@@ -234,6 +336,7 @@ function eat(eater: Protocell, prey: Protocell) {
   }
   prey.startEngulf(eater)
   effects.ripple(prey.cx, prey.cy, eater.palette.rim, 0.8)
+  if (prey.colony) effects.ripple(prey.cx, prey.cy, prey.palette.rim, 1.2)
   if (eater === player) {
     cellsEaten++
     updateHud()
@@ -450,6 +553,245 @@ function feed(dt: number) {
   }
 }
 
+// ── The Great Transition ─────────────────────────────────────────────────────
+
+function transitionReady() {
+  return (
+    phase === 'living' &&
+    deathTime === null &&
+    !choosing &&
+    evolutions >= TRANSITION_EVOLUTIONS &&
+    player.biomass >= TRANSITION_BIOMASS
+  )
+}
+
+function openConfirm() {
+  if (!transitionReady() || confirming) return
+  confirming = true
+  input.release()
+  hud.prompt.classList.add('shown')
+}
+
+function closeConfirm() {
+  confirming = false
+  hud.prompt.classList.remove('shown')
+}
+
+/** Divide the body into a colony of small cells that inherit every adaptation. */
+function beginTransition() {
+  closeConfirm()
+  if (phase !== 'living' || deathTime !== null) return
+  phase = 'colony'
+  phaseTime = 0
+  input.release()
+  const traits = [...player.traits]
+  const each = (player.biomass * COLONY_SHARE) / COLONY_CELLS
+  for (let i = 0; i < COLONY_CELLS; i++) {
+    const a = (i / COLONY_CELLS) * TAU
+    const c = new Protocell(
+      player.cx + Math.cos(a) * player.R * 0.45,
+      player.cy + Math.sin(a) * player.R * 0.45,
+      each,
+      'player',
+    )
+    c.colony = true
+    for (const t of traits) c.addTrait(t)
+    for (const p of c.pts) {
+      p.vx = player.cvx + Math.cos(a) * 45
+      p.vy = player.cvy + Math.sin(a) * 45
+    }
+    cells.push(c)
+    colony.push(c)
+  }
+  // The old membrane splits apart.
+  player.gone = true
+  for (let i = 0; i < player.pts.length; i += 2) {
+    const p = player.pts[i]
+    const a = Math.atan2(p.y - player.cy, p.x - player.cx)
+    effects.shard(
+      p.x,
+      p.y,
+      player.cvx + Math.cos(a) * 60,
+      player.cvy + Math.sin(a) * 60,
+      a,
+      player.R * 0.3,
+      player.palette.rim,
+    )
+  }
+  effects.ripple(player.cx, player.cy, player.palette.rim, 1.4)
+  // Everything nearby notices: predators drop what they were doing.
+  for (const c of cells) if (c.brain) c.brain.rest = 0
+  updateFocus()
+  updateBanner()
+  hud.banner.classList.add('shown')
+}
+
+const flockSteer: Steer = { x: 0, y: 0, mag: 0 }
+
+/** Colony steering: your input, plus staying together and not piling on top of each other. */
+function flock(cell: Protocell, steer: Steer) {
+  let x = steer.x * steer.mag
+  let y = steer.y * steer.mag
+  const dx = wrapDelta(focus.x - cell.cx, WORLD)
+  const dy = wrapDelta(focus.y - cell.cy, WORLD)
+  const d = Math.hypot(dx, dy) || 1
+  const pull = clamp((d - cell.R * 2.5) / (cell.R * 4), 0, 1)
+  x += (dx / d) * pull * 0.9
+  y += (dy / d) * pull * 0.9
+  for (const other of colony) {
+    if (other === cell) continue
+    const ox = wrapDelta(cell.cx - other.cx, WORLD)
+    const oy = wrapDelta(cell.cy - other.cy, WORLD)
+    const od = Math.hypot(ox, oy) || 1
+    const room = (cell.R + other.R) * 1.25
+    if (od >= room) continue
+    const push = 1 - od / room
+    x += (ox / od) * push * 0.8
+    y += (oy / od) * push * 0.8
+  }
+  const len = Math.hypot(x, y)
+  flockSteer.x = len > 0 ? x / len : 0
+  flockSteer.y = len > 0 ? y / len : 0
+  flockSteer.mag = len < 0.05 ? 0 : Math.min(1, len)
+  return flockSteer
+}
+
+function advanceTransition(dt: number) {
+  if (phase === 'colony') {
+    phaseTime += dt
+    if (colony.length < MIN_SURVIVORS) failTransition()
+    else if (phaseTime >= TRANSITION_TIME) beginAssembly()
+    else updateBanner()
+  } else if (phase === 'assembling') {
+    phaseTime += dt
+    if (phaseTime >= ASSEMBLY_TIME) completeTransition()
+  }
+}
+
+let bannerText = ''
+function updateBanner() {
+  const left = Math.max(0, Math.ceil(TRANSITION_TIME - phaseTime))
+  const text =
+    phase === 'colony'
+      ? `Hold together · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} · ${colony.length} cells`
+      : 'Binding…'
+  if (text !== bannerText) hud.banner.textContent = bannerText = text
+}
+
+/** The minute is up: survivors pull into the shape of the organism they're becoming. */
+function beginAssembly() {
+  phase = 'assembling'
+  phaseTime = 0
+  lineage = lineageFor([...player.traits])
+  const offsets = formationOffsets(lineage.formation, colony.length)
+  formationAngle = Math.hypot(focus.vx, focus.vy) > 5 ? Math.atan2(focus.vy, focus.vx) : 0
+  // Greedy: each slot takes the nearest cell not yet placed.
+  slots.clear()
+  const free = new Set(colony)
+  const cos = Math.cos(formationAngle)
+  const sin = Math.sin(formationAngle)
+  for (const [ox, oy] of offsets) {
+    const tx = (ox * cos - oy * sin) * focus.r
+    const ty = (ox * sin + oy * cos) * focus.r
+    let best: Protocell | null = null
+    let bestD = Infinity
+    for (const c of free) {
+      const d = Math.hypot(wrapDelta(c.cx - focus.x, WORLD) - tx, wrapDelta(c.cy - focus.y, WORLD) - ty)
+      if (d < bestD) {
+        best = c
+        bestD = d
+      }
+    }
+    if (best) {
+      slots.set(best, [ox, oy])
+      free.delete(best)
+    }
+  }
+  // Predators lose interest in something this large and coordinated.
+  for (const c of cells) {
+    if (!c.brain) continue
+    c.brain.prey = null
+    c.brain.rest = 30
+  }
+  updateBanner()
+}
+
+/** Spring each colony cell toward its slot; strength ramps up over the assembly. */
+function holdFormation(dt: number) {
+  const k = phase === 'complete' ? 1 : Math.min(1, phaseTime / ASSEMBLY_TIME)
+  const cos = Math.cos(formationAngle)
+  const sin = Math.sin(formationAngle)
+  for (const c of colony) {
+    const slot = slots.get(c)
+    if (!slot) continue
+    const tx = focus.x + (slot[0] * cos - slot[1] * sin) * focus.r
+    const ty = focus.y + (slot[0] * sin + slot[1] * cos) * focus.r
+    const ax = (wrapDelta(tx - c.cx, WORLD) * 6 - (c.cvx - focus.vx) * 3) * k
+    const ay = (wrapDelta(ty - c.cy, WORLD) * 6 - (c.cvy - focus.vy) * 3) * k
+    for (const p of c.pts) {
+      p.vx += ax * dt
+      p.vy += ay * dt
+    }
+  }
+}
+
+function completeTransition() {
+  phase = 'complete'
+  hud.banner.classList.remove('shown')
+  const result = lineage ?? lineageFor([...player.traits])
+  const discovered = recordLineage(result.name)
+  const seconds = Math.round(time - startTime)
+  hud.lineageName.textContent = result.name
+  hud.lineageForm.textContent = `It became ${result.form}.`
+  hud.lineageStats.textContent =
+    `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} · peak biomass ×${player.biomass.toFixed(1)} · ` +
+    `${cellsEaten} cells absorbed · ${evolutions} evolutions · ${colony.length} of ${COLONY_CELLS} cells survived`
+  hud.lineageDiscovered.textContent =
+    discovered === null ? '' : `${discovered} ${discovered === 1 ? 'lineage' : 'lineages'} discovered`
+  hud.lineage.classList.add('shown')
+  effects.ripple(focus.x, focus.y, player.palette.rim, 2)
+}
+
+function failTransition() {
+  deathTime = time
+  hud.banner.classList.remove('shown')
+  const seconds = Math.round(time - startTime)
+  hud.deathTitle.textContent = 'The colony was devoured'
+  hud.deathCause.textContent = `Only ${colony.length} of ${COLONY_CELLS} cells were left; it takes ${MIN_SURVIVORS} to bind.`
+  hud.deathStats.textContent =
+    `Survived ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} · ` +
+    `peak biomass ×${player.biomass.toFixed(2)} · ${cellsEaten} cells absorbed`
+  hud.death.classList.add('shown')
+}
+
+/** Membrane bridges between neighbouring colony cells as they bind. */
+function drawBridges() {
+  if (phase !== 'assembling' && phase !== 'complete') return
+  const k = phase === 'complete' ? 1 : Math.min(1, phaseTime / ASSEMBLY_TIME)
+  const z = view.zoom
+  ctx.lineCap = 'round'
+  for (let i = 0; i < colony.length; i++) {
+    const a = colony[i]
+    const ax = view.sx(a.cx)
+    const ay = view.sy(a.cy)
+    for (let j = i + 1; j < colony.length; j++) {
+      const b = colony[j]
+      const dx = wrapDelta(b.cx - a.cx, WORLD)
+      const dy = wrapDelta(b.cy - a.cy, WORLD)
+      if (Math.hypot(dx, dy) > (a.R + b.R) * 1.35) continue
+      ctx.beginPath()
+      ctx.moveTo(ax, ay)
+      ctx.lineTo(ax + dx * z, ay + dy * z)
+      ctx.lineWidth = Math.min(a.R, b.R) * z * 1.1 * k
+      ctx.strokeStyle = `rgba(${a.palette.body},${0.28 * k})`
+      ctx.stroke()
+      ctx.lineWidth = Math.max(1, Math.min(a.R, b.R) * z * 0.12)
+      ctx.strokeStyle = `rgba(${a.palette.rim},${0.5 * k})`
+      ctx.stroke()
+    }
+  }
+}
+
 function nextEvolutionCost() {
   return EVOLUTION_COST[Math.min(evolutions, EVOLUTION_COST.length - 1)]
 }
@@ -562,9 +904,9 @@ window.addEventListener('keydown', e => {
 function updateCamera(dt: number) {
   // Follow with a little lag and look-ahead, so speed reads as the cell drifting off-centre.
   const k = 1 - Math.exp(-4 * dt)
-  const lead = deathTime === null ? 0.25 : 0
-  view.x = wrapCoord(view.x + wrapDelta(player.cx + player.cvx * lead - view.x, WORLD) * k, WORLD)
-  view.y = wrapCoord(view.y + wrapDelta(player.cy + player.cvy * lead - view.y, WORLD) * k, WORLD)
+  const lead = deathTime === null && phase !== 'complete' ? 0.25 : 0
+  view.x = wrapCoord(view.x + wrapDelta(focus.x + focus.vx * lead - view.x, WORLD) * k, WORLD)
+  view.y = wrapCoord(view.y + wrapDelta(focus.y + focus.vy * lead - view.y, WORLD) * k, WORLD)
   view.zoom += (targetZoom() - view.zoom) * (1 - Math.exp(-1.5 * dt))
 }
 
@@ -591,7 +933,9 @@ function render() {
   for (const vent of vents) vent.draw(ctx, view, time)
   nutrients.draw(ctx, view, time)
   // Cells being swallowed draw on top of whatever is swallowing them; the player draws above its peers.
-  for (const cell of cells) if (!cell.engulfedBy && cell !== player) cell.draw(ctx, view)
+  for (const cell of cells) if (!cell.engulfedBy && cell !== player && !cell.colony) cell.draw(ctx, view)
+  drawBridges()
+  for (const cell of colony) cell.draw(ctx, view)
   if (!player.gone) player.draw(ctx, view)
   for (const cell of cells) if (cell.engulfedBy) cell.draw(ctx, view)
   drawTendril()
@@ -613,6 +957,16 @@ const hud = {
   deathCause: document.querySelector<HTMLElement>('#death .cause')!,
   deathStats: document.querySelector<HTMLElement>('#death .stats')!,
   evolve: document.querySelector<HTMLElement>('#evolve')!,
+  deathTitle: document.querySelector<HTMLElement>('#death h1')!,
+  transitionBtn: document.querySelector<HTMLButtonElement>('#transition-btn')!,
+  banner: document.querySelector<HTMLElement>('#banner')!,
+  prompt: document.querySelector<HTMLElement>('#prompt')!,
+  lineage: document.querySelector<HTMLElement>('#lineage')!,
+  lineageName: document.querySelector<HTMLElement>('#lineage .name')!,
+  lineageForm: document.querySelector<HTMLElement>('#lineage .form')!,
+  lineageStats: document.querySelector<HTMLElement>('#lineage .stats')!,
+  lineageDiscovered: document.querySelector<HTMLElement>('#lineage .discovered')!,
+  goal: document.querySelector<HTMLElement>('#goal b')!,
   cards: document.querySelector<HTMLElement>('#evolve .cards')!,
 }
 
@@ -622,6 +976,9 @@ function updateHud() {
   const more = availableTraits(player.traits).length > 0
   hud.mineral.textContent = more ? `${eaten.mineral} / ${nextEvolutionCost()}` : String(eaten.mineral)
   hud.biomass.textContent = `×${player.biomass.toFixed(2)}`
+  hud.goal.textContent =
+    `${Math.min(evolutions, TRANSITION_EVOLUTIONS)}/${TRANSITION_EVOLUTIONS} evolutions · ` +
+    `×${Math.min(player.biomass, TRANSITION_BIOMASS).toFixed(1)}/×${TRANSITION_BIOMASS}`
 }
 
 /** After dying, any tap or key starts a new protocell (with a short pause so the burst can play). */
@@ -630,6 +987,17 @@ function tryRestart() {
 }
 canvas.addEventListener('pointerdown', tryRestart)
 window.addEventListener('keydown', tryRestart)
+
+hud.transitionBtn.addEventListener('click', openConfirm)
+hud.prompt.querySelector('[data-action="begin"]')!.addEventListener('click', beginTransition)
+hud.prompt.querySelector('[data-action="cancel"]')!.addEventListener('click', closeConfirm)
+hud.lineage.querySelector('[data-action="again"]')!.addEventListener('click', () => reset())
+window.addEventListener('keydown', e => {
+  if (confirming && e.key === 'Enter') beginTransition()
+  else if (confirming && e.key === 'Escape') closeConfirm()
+  else if (phase === 'complete' && e.key === 'Enter') reset()
+  else if (e.key.toLowerCase() === 't' && transitionReady()) openConfirm()
+})
 
 // Tuning panel
 const gui = new GUI({ title: 'Tuning' })
@@ -673,7 +1041,7 @@ let fpsTime = 0
 function frame(now: number) {
   const elapsed = Math.min((now - last) / 1000, 0.1)
   last = now
-  acc += elapsed * (choosing ? CHOICE_TIME_SCALE : 1)
+  acc += elapsed * (choosing || confirming ? CHOICE_TIME_SCALE : phase === 'complete' ? 0.5 : 1)
   let steps = 0
   while (acc >= STEP && steps < 3) {
     simulate(STEP)
@@ -681,8 +1049,10 @@ function frame(now: number) {
     steps++
   }
   if (steps === 3) acc = 0
+  updateFocus()
   updateCamera(elapsed)
   render()
+  hud.transitionBtn.classList.toggle('shown', transitionReady() && !confirming)
 
   if (input.used) hud.hint.classList.add('hidden')
   fpsFrames++
@@ -711,6 +1081,29 @@ if (import.meta.env.DEV) {
       evolve(id: TraitId) {
         player.addTrait(id)
         updateHud()
+      },
+      /** Skip ahead to the Great Transition: evolve to the requirement and grow. */
+      readyTransition() {
+        while (evolutions < TRANSITION_EVOLUTIONS && availableTraits(player.traits).length) {
+          player.addTrait(availableTraits(player.traits)[0].id)
+          evolutions++
+        }
+        player.grow(Math.max(0, TRANSITION_BIOMASS - player.biomass))
+        updateHud()
+      },
+      beginTransition() {
+        openConfirm()
+        beginTransition()
+      },
+      /** Jump to the end of the current transition stage (survival minute or assembly). */
+      skipTimer() {
+        phaseTime = (phase === 'colony' ? TRANSITION_TIME : ASSEMBLY_TIME) - 0.05
+      },
+      get colony() {
+        return colony
+      },
+      get phase() {
+        return phase
       },
       spawnNear(species: Species, biomass: number, dist = 120) {
         const cell = new Protocell(player.cx + dist, player.cy, biomass, species)

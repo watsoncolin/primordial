@@ -251,3 +251,167 @@ body {
   text-transform: uppercase;
   color: rgba(175, 255, 235, 0.6);
 }
+
+kbd {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 10px;
+  opacity: 0.55;
+}
+
+#transition-btn {
+  position: fixed;
+  left: 50%;
+  bottom: calc(64px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  padding: 10px 18px;
+  border: 1px solid rgba(175, 255, 235, 0.6);
+  border-radius: 999px;
+  background: rgba(10, 46, 50, 0.75);
+  color: rgba(225, 255, 248, 0.95);
+  font: inherit;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.6s;
+  animation: beckon 2.4s ease-in-out infinite;
+}
+
+#transition-btn.shown {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@keyframes beckon {
+  0%,
+  100% {
+    box-shadow: 0 0 0 rgba(175, 255, 235, 0);
+  }
+  50% {
+    box-shadow: 0 0 24px rgba(175, 255, 235, 0.35);
+  }
+}
+
+#banner {
+  position: fixed;
+  top: calc(14px + env(safe-area-inset-top));
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  color: rgba(225, 255, 248, 0.9);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.6s;
+}
+
+#banner.shown {
+  opacity: 1;
+}
+
+#prompt,
+#lineage {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px 16px;
+  text-align: center;
+  color: rgba(220, 240, 245, 0.88);
+  background: radial-gradient(ellipse at center, rgba(2, 12, 18, 0.35), rgba(2, 8, 12, 0.8));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.5s;
+}
+
+#lineage {
+  /* Text sits low so the newly formed organism stays visible in the middle of the screen. */
+  justify-content: flex-end;
+  padding-bottom: calc(9vh + env(safe-area-inset-bottom));
+  background: linear-gradient(to bottom, rgba(2, 8, 12, 0) 45%, rgba(2, 8, 12, 0.85));
+  transition: opacity 1.2s 0.8s;
+}
+
+#prompt.shown,
+#lineage.shown {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+#prompt h1,
+#lineage h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: rgba(175, 255, 235, 0.9);
+}
+
+#prompt .body {
+  max-width: 420px;
+  margin: 4px 0 12px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+#lineage .name {
+  margin: 6px 0 0;
+  font-size: 30px;
+  font-weight: 500;
+  font-style: italic;
+  color: rgba(240, 255, 252, 0.98);
+}
+
+#lineage .form {
+  margin: 0;
+  font-size: 14px;
+  opacity: 0.85;
+}
+
+#lineage .stats,
+#lineage .discovered {
+  margin: 4px 0 0;
+  font-size: 12px;
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+}
+
+#lineage .discovered {
+  margin-bottom: 14px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
+#prompt button,
+#lineage button {
+  padding: 9px 16px;
+  border: 1px solid rgba(175, 255, 235, 0.35);
+  border-radius: 10px;
+  background: rgba(10, 40, 46, 0.7);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#prompt button.primary,
+#lineage button.primary {
+  border-color: rgba(175, 255, 235, 0.8);
+  background: rgba(16, 64, 66, 0.85);
+}

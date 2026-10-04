@@ -18,12 +18,35 @@
       <div class="stat" data-kind="lipid"><i></i>lipids <b>0</b></div>
       <div class="stat" data-kind="mineral"><i></i>minerals <b>0</b></div>
       <div class="stat" id="biomass">biomass <b>×1.00</b></div>
+      <div class="stat" id="goal">transition <b></b></div>
       <div id="fps"></div>
     </div>
     <div id="evolve">
       <h1>Evolution</h1>
       <p>Your protocell has gathered enough minerals to change.</p>
       <div class="cards"></div>
+    </div>
+    <button id="transition-btn" type="button">Begin the Great Transition <kbd>T</kbd></button>
+    <div id="banner"></div>
+    <div id="prompt">
+      <h1>The Great Transition</h1>
+      <p class="body">
+        Divide into many cells and let them bind into something new.<br />
+        Your cells will be small and edible, and everything nearby will notice.<br />
+        Keep at least three alive for a minute.
+      </p>
+      <div class="actions">
+        <button type="button" class="primary" data-action="begin">Divide <kbd>Enter</kbd></button>
+        <button type="button" data-action="cancel">Not yet <kbd>Esc</kbd></button>
+      </div>
+    </div>
+    <div id="lineage">
+      <h2>A new lineage has emerged</h2>
+      <h1 class="name"></h1>
+      <p class="form"></p>
+      <p class="stats"></p>
+      <p class="discovered"></p>
+      <button type="button" class="primary" data-action="again">Begin a new protocell <kbd>Enter</kbd></button>
     </div>
     <div id="death">
       <h1>Membrane ruptured</h1>
