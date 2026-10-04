@@ -8,6 +8,9 @@
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
     <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#04141c" />
     <title>Primordial</title>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
@@ -29,6 +32,7 @@
       <div class="cards"></div>
     </div>
     <button id="transition-btn" type="button">Begin the Great Transition <kbd>T</kbd></button>
+    <button id="burst-btn" type="button" aria-label="Burst Jet">jet</button>
     <div id="banner"></div>
     <div id="hazard"></div>
     <div id="mutation">
@@ -66,7 +70,7 @@
       <h1>Membrane ruptured</h1>
       <p class="cause"></p>
       <p class="stats"></p>
-      <p class="again">Tap to begin again · L for the Tree of Life</p>
+      <p class="again">Tap to begin again<span class="keys"> · L for the Tree of Life</span></p>
     </div>
     <button id="sound" type="button"></button>
     <button id="tree-btn" type="button">tree of life <kbd>L</kbd></button>
@@ -85,7 +89,10 @@
         </aside>
       </div>
     </div>
-    <div id="hint">Hold and drag to swim · WASD on a keyboard</div>
+    <div id="hint">
+      <span class="keys">Hold and drag to swim · WASD on a keyboard</span>
+      <span class="touch">Put your thumb down anywhere and drag to swim</span>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

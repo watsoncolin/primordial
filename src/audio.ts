@@ -22,6 +22,12 @@ export class Sound {
     const unlock = () => this.unlock()
     window.addEventListener('pointerdown', unlock)
     window.addEventListener('keydown', unlock)
+    // Phones keep audio running when you switch apps; go quiet with the page.
+    document.addEventListener('visibilitychange', () => {
+      if (!this.ctx) return
+      if (document.hidden) void this.ctx.suspend()
+      else void this.ctx.resume()
+    })
   }
 
   get running() {

@@ -75,7 +75,7 @@ export const TRAITS: Record<TraitId, TraitInfo> = {
     id: 'burst',
     name: 'Burst Jet',
     tagline: 'One violent snap of the tail.',
-    detail: 'Press Space or double-tap to lunge forward. Takes a few seconds to recover.',
+    detail: 'Press Space or the jet button to lunge forward. Takes a few seconds to recover.',
     requires: 'flagellum',
   },
   spikes: {

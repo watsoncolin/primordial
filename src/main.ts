@@ -31,7 +31,7 @@ import { PROTOCELL_RADIUS, WORLD, tuning } from './config'
 import { Dust } from './dust'
 import { Effects } from './effects'
 import { Fluid } from './fluid'
-import { Input } from './input'
+import { Input, STICK_REACH } from './input'
 import { TAU, clamp, rand, wrapCoord, wrapDelta } from './math'
 import { type Kind, Nutrients } from './nutrients'
 import { NUTRIENT_RGB, Protocell, type Species } from './protocell'
@@ -141,6 +141,23 @@ function playerSteer(x: number, y: number, r: number): Steer {
     stickySteer.mag = 1
   }
   return stickySteer
+}
+
+/** The touch joystick: a faint base ring where the thumb landed and a knob under it. */
+function drawStick() {
+  const st = input.stick
+  if (!st || deathTime !== null || choosing || confirming) return
+  ctx.lineWidth = 1.5
+  ctx.strokeStyle = 'rgba(200,240,240,0.22)'
+  ctx.fillStyle = 'rgba(200,240,240,0.05)'
+  ctx.beginPath()
+  ctx.arc(st.ox, st.oy, STICK_REACH, 0, TAU)
+  ctx.fill()
+  ctx.stroke()
+  ctx.fillStyle = 'rgba(200,240,240,0.28)'
+  ctx.beginPath()
+  ctx.arc(st.x, st.y, 22, 0, TAU)
+  ctx.fill()
 }
 
 /** Sticky test mode: an arrow showing the held direction, and a crosshair on a click target. */
@@ -1732,7 +1749,8 @@ function updateCamera(dt: number) {
 let vignette: CanvasGradient
 
 function resize() {
-  const dpr = window.devicePixelRatio || 1
+  // Phones report 3x; the extra pixels cost a lot of fill rate and are hard to see on a moving scene.
+  const dpr = Math.min(2, window.devicePixelRatio || 1)
   view.w = canvas.clientWidth
   view.h = canvas.clientHeight
   canvas.width = view.w * dpr
@@ -1777,6 +1795,7 @@ function render() {
   ctx.fillStyle = vignette
   ctx.fillRect(0, 0, view.w, view.h)
   if (deathTime === null && player.traits.has('chemoreception')) senses.draw(ctx, view, time)
+  drawStick()
 }
 
 // HUD
@@ -1799,6 +1818,7 @@ const hud = {
   tree: document.querySelector<HTMLElement>('#tree')!,
   deathTitle: document.querySelector<HTMLElement>('#death h1')!,
   transitionBtn: document.querySelector<HTMLButtonElement>('#transition-btn')!,
+  burstBtn: document.querySelector<HTMLButtonElement>('#burst-btn')!,
   banner: document.querySelector<HTMLElement>('#banner')!,
   prompt: document.querySelector<HTMLElement>('#prompt')!,
   lineage: document.querySelector<HTMLElement>('#lineage')!,
@@ -1871,6 +1891,10 @@ canvas.addEventListener('pointerdown', tryRestart)
 window.addEventListener('keydown', tryRestart)
 
 hud.transitionBtn.addEventListener('click', openConfirm)
+hud.burstBtn.addEventListener('pointerdown', e => {
+  e.preventDefault()
+  input.queueDash()
+})
 hud.prompt.querySelector('[data-action="begin"]')!.addEventListener('click', beginTransition)
 hud.prompt.querySelector('[data-action="cancel"]')!.addEventListener('click', closeConfirm)
 hud.lineage.querySelector('[data-action="again"]')!.addEventListener('click', () => reset())
@@ -1882,7 +1906,9 @@ window.addEventListener('keydown', e => {
 })
 
 // Tuning panel
+// Tuning panel: always in development, and with ?tune on the deployed game.
 const gui = new GUI({ title: 'Tuning' })
+if (!import.meta.env.DEV && !new URLSearchParams(location.search).has('tune')) gui.hide()
 const fluidFolder = gui.addFolder('Fluid')
 fluidFolder.add(tuning, 'currentStrength', 0, 60).name('current')
 fluidFolder.add(tuning, 'currentRelax', 0, 3).name('current pull')
@@ -1957,6 +1983,10 @@ function frame(now: number) {
     hud.hazard.style.color = hazardWarning ? `rgb(${ZONES[hazardWarning].rgb})` : ''
   }
   hud.transitionBtn.classList.toggle('shown', transitionReady() && !confirming)
+  const canBurst =
+    player.traits.has('burst') && deathTime === null && (phase === 'living' || phase === 'colony') && !choosing
+  hud.burstBtn.classList.toggle('shown', canBurst)
+  hud.burstBtn.classList.toggle('cooling', player.dashCooldown > 0)
 
   if (input.used) hud.hint.classList.add('hidden')
   fpsFrames++

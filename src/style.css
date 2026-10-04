@@ -779,3 +779,159 @@ kbd {
   height: 26px;
   opacity: 0.8;
 }
+
+#burst-btn {
+  position: fixed;
+  right: calc(20px + env(safe-area-inset-right));
+  bottom: calc(72px + env(safe-area-inset-bottom));
+  width: 68px;
+  height: 68px;
+  border: 1px solid rgba(175, 255, 235, 0.55);
+  border-radius: 50%;
+  background: rgba(10, 46, 50, 0.6);
+  color: rgba(225, 255, 248, 0.9);
+  font: inherit;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  display: none;
+  transition: opacity 0.2s;
+}
+
+#burst-btn.cooling {
+  opacity: 0.35;
+}
+
+#hint .touch {
+  display: none;
+}
+
+/* Phones and tablets: no keyboard hints, bigger buttons, and the on-screen jet. */
+@media (hover: none) and (pointer: coarse) {
+  kbd,
+  .card .key,
+  .keys {
+    display: none;
+  }
+
+  #hint .touch {
+    display: inline;
+  }
+
+  #burst-btn.shown {
+    display: block;
+  }
+
+  #sound,
+  #tree-btn {
+    padding: 9px 12px;
+    font-size: 12px;
+  }
+
+  #tree-btn {
+    right: calc(108px + env(safe-area-inset-right));
+  }
+
+  #tree header button,
+  #tree .unlock button {
+    padding: 8px 12px;
+  }
+}
+
+/* Small screens: evolution cards become compact rows (two columns in landscape) and scroll if needed. */
+@media (max-width: 640px), (max-height: 560px) {
+  #evolve,
+  #prompt,
+  #lineage {
+    justify-content: safe center;
+    overflow-y: auto;
+    padding: calc(16px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right))
+      calc(16px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left));
+  }
+
+  #lineage {
+    justify-content: safe flex-end;
+  }
+
+  #evolve > p {
+    margin-bottom: 8px;
+  }
+
+  #evolve .cards {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+    width: 100%;
+    max-width: 520px;
+  }
+
+  .card {
+    display: grid;
+    grid-template-columns: 64px 1fr;
+    align-items: start;
+    gap: 2px 12px;
+    width: auto;
+    padding: 10px 14px 10px 10px;
+    text-align: left;
+  }
+
+  .card > :not(.icon, .key) {
+    grid-column: 2;
+  }
+
+  .card .icon,
+  .card .icon:has(.preview) {
+    grid-column: 1;
+    grid-row: 1 / span 4;
+    align-self: center;
+    width: 64px;
+    height: 64px;
+  }
+
+  .card .icon .badge {
+    width: 20px;
+    height: 20px;
+  }
+
+  .card .name {
+    font-size: 15px;
+  }
+
+  .card .lineage {
+    margin-top: 0;
+  }
+
+  #lineage .name {
+    font-size: 24px;
+  }
+}
+
+@media (max-height: 560px) and (min-width: 600px) {
+  #evolve .cards {
+    grid-template-columns: 1fr 1fr;
+    max-width: 860px;
+  }
+}
+
+/* The swim hint and transient warnings stay out of the way of whatever overlay is up. */
+#evolve.shown ~ #hint,
+#prompt.shown ~ #hint,
+#lineage.shown ~ #hint,
+#death.shown ~ #hint {
+  opacity: 0;
+}
+
+/* Narrow screens: the HUD column fills the top-left, so banners sit below it and the hint above the buttons. */
+@media (max-width: 640px) {
+  #banner {
+    top: calc(176px + env(safe-area-inset-top));
+  }
+
+  #hazard {
+    top: calc(196px + env(safe-area-inset-top));
+  }
+
+  #hint {
+    bottom: calc(64px + env(safe-area-inset-bottom));
+    padding: 0 24px;
+  }
+}

@@ -12,13 +12,22 @@ const KEYS: Record<string, [number, number]> = {
 }
 
 const DOUBLE_TAP_MS = 300
+/** Touch joystick: drag this far (px) for full thrust; the base trails the finger beyond it. */
+export const STICK_REACH = 64
+const STICK_DEAD = 8
 
-/** Touch/mouse: hold and drag anywhere; direction and strength come from where you hold relative to the cell. */
+/**
+ * Mouse: hold anywhere; direction and strength come from where you hold relative to the cell.
+ * Touch: a floating joystick wherever your thumb lands, so you never have to reach across the
+ * screen or cover your own cell. A second finger (or a quick double-tap) is Burst Jet.
+ */
 export class Input {
   /** Steering result from the last read(): unit direction and 0..1 strength. */
   readonly steer = { x: 0, y: 0, mag: 0 }
   used = false
   private pointer: { x: number; y: number } | null = null
+  /** The touch joystick: where the thumb landed (base, trailing past STICK_REACH) and where it is now. */
+  stick: { id: number; ox: number; oy: number; x: number; y: number } | null = null
   private readonly keys = new Set<string>()
   private lastTap = 0
   private dashQueued = false
@@ -42,16 +51,37 @@ export class Input {
         return
       }
       canvas.setPointerCapture(e.pointerId)
-      this.pointer = { x: e.clientX, y: e.clientY }
       // A quick second tap is the touch equivalent of Space.
       if (e.timeStamp - this.lastTap < DOUBLE_TAP_MS) this.dashQueued = true
       this.lastTap = e.timeStamp
+      if (e.pointerType === 'touch') {
+        // Another finger while steering: lunge, and keep steering with the first.
+        if (this.stick) this.dashQueued = true
+        else this.stick = { id: e.pointerId, ox: e.clientX, oy: e.clientY, x: e.clientX, y: e.clientY }
+        return
+      }
+      this.pointer = { x: e.clientX, y: e.clientY }
     })
     canvas.addEventListener('pointermove', e => {
-      if (this.pointer) this.pointer = { x: e.clientX, y: e.clientY }
+      const st = this.stick
+      if (st && e.pointerId === st.id) {
+        st.x = e.clientX
+        st.y = e.clientY
+        const dx = st.x - st.ox
+        const dy = st.y - st.oy
+        const len = Math.hypot(dx, dy)
+        if (len > STICK_REACH) {
+          st.ox = st.x - (dx / len) * STICK_REACH
+          st.oy = st.y - (dy / len) * STICK_REACH
+        }
+      } else if (this.pointer) this.pointer = { x: e.clientX, y: e.clientY }
     })
-    canvas.addEventListener('pointerup', () => (this.pointer = null))
-    canvas.addEventListener('pointercancel', () => (this.pointer = null))
+    const lift = (e: PointerEvent) => {
+      if (this.stick?.id === e.pointerId) this.stick = null
+      else this.pointer = null
+    }
+    canvas.addEventListener('pointerup', lift)
+    canvas.addEventListener('pointercancel', lift)
     window.addEventListener('keydown', e => {
       if (e.target instanceof HTMLInputElement) return
       const key = e.key.toLowerCase()
@@ -86,12 +116,14 @@ export class Input {
     window.addEventListener('blur', () => {
       this.keys.clear()
       this.pointer = null
+      this.stick = null
     })
   }
 
   /** Forget any held pointer/keys, e.g. after a UI overlay took over. */
   release() {
     this.pointer = null
+    this.stick = null
     this.keys.clear()
     this.dashQueued = false
   }
@@ -104,6 +136,12 @@ export class Input {
     const c = this.pendingClick
     this.pendingClick = null
     return c
+  }
+
+  /** An on-screen Burst button was pressed. */
+  queueDash() {
+    this.used = true
+    this.dashQueued = true
   }
 
   /** True once per Space press or double-tap. */
@@ -128,7 +166,18 @@ export class Input {
       s.mag = 1
       return s
     }
-    if (this.pointer) {
+    const st = this.stick
+    if (st) {
+      const dx = st.x - st.ox
+      const dy = st.y - st.oy
+      const len = Math.hypot(dx, dy)
+      if (len > STICK_DEAD) {
+        s.x = dx / len
+        s.y = dy / len
+        s.mag = clamp(len / STICK_REACH, 0.25, 1)
+        return s
+      }
+    } else if (this.pointer) {
       const dx = this.pointer.x - cellX
       const dy = this.pointer.y - cellY
       const len = Math.hypot(dx, dy)
