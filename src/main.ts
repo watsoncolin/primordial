@@ -94,8 +94,14 @@ function screenRadius() {
   return clamp(Math.min(view.w, view.h) * 0.06, 26, 60)
 }
 
+/**
+ * Keep the player a constant size on screen, but never zoom out so far that more than ~90% of the
+ * wrapping world is visible (you'd see its seam and things popping across it). Past that point the
+ * player just gets bigger on screen, until the world itself scales with the player.
+ */
 function targetZoom() {
-  return screenRadius() / player.R
+  const minZoom = Math.max(view.w, view.h) / (WORLD * 0.9)
+  return Math.max(screenRadius() / player.R, minZoom)
 }
 
 function simulate(dt: number) {

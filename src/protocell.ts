@@ -354,8 +354,9 @@ export class Protocell {
     ctx.globalAlpha = alpha
     const { sx, sy } = this
     for (let i = 0; i < POINTS; i++) {
-      sx[i] = view.sx(this.pts[i].x)
-      sy[i] = view.sy(this.pts[i].y)
+      // Offsets from the centre, so only the centre is wrapped and the outline can't split across the seam.
+      sx[i] = cx + (this.pts[i].x - this.cx) * view.zoom
+      sy[i] = cy + (this.pts[i].y - this.cy) * view.zoom
     }
     // Smooth closed curve through the membrane points.
     const path = new Path2D()
@@ -383,10 +384,10 @@ export class Protocell {
 
     ctx.save()
     ctx.clip(path)
-    for (const b of this.inner) this.drawBlob(ctx, view, b, 0.9)
+    for (const b of this.inner) this.drawBlob(ctx, view.zoom, cx, cy, b, 0.9)
     for (const b of this.digesting) {
       const t = b.life / b.maxLife
-      this.drawBlob(ctx, view, b, 0.85 * Math.min(1, t * 2), Math.sqrt(t))
+      this.drawBlob(ctx, view.zoom, cx, cy, b, 0.85 * Math.min(1, t * 2), Math.sqrt(t))
     }
     ctx.restore()
 
@@ -408,11 +409,20 @@ export class Protocell {
     ctx.globalAlpha = 1
   }
 
-  private drawBlob(ctx: CanvasRenderingContext2D, view: View, b: Blob, alpha: number, scale = 1) {
-    const r = b.r * scale * this.R * view.zoom
+  /** `cx, cy` is the cell centre on screen. */
+  private drawBlob(
+    ctx: CanvasRenderingContext2D,
+    zoom: number,
+    cx: number,
+    cy: number,
+    b: Blob,
+    alpha: number,
+    scale = 1,
+  ) {
+    const r = b.r * scale * this.R * zoom
     if (r < 0.3) return
-    const x = view.sx(b.x)
-    const y = view.sy(b.y)
+    const x = cx + (b.x - this.cx) * zoom
+    const y = cy + (b.y - this.cy) * zoom
     const g = ctx.createRadialGradient(x, y, 0, x, y, r)
     g.addColorStop(0, `rgba(${b.rgb},${alpha})`)
     g.addColorStop(0.6, `rgba(${b.rgb},${alpha * 0.6})`)
