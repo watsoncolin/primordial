@@ -3,15 +3,84 @@ body {
   margin: 0;
   height: 100%;
   overflow: hidden;
-  background: #04121a;
+  background: #04141c;
   overscroll-behavior: none;
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
+  font-family:
+    ui-rounded,
+    system-ui,
+    -apple-system,
+    sans-serif;
 }
 
 #game {
   display: block;
   width: 100vw;
   height: 100dvh;
+}
+
+#hud {
+  position: fixed;
+  top: calc(12px + env(safe-area-inset-top));
+  left: calc(14px + env(safe-area-inset-left));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: rgba(200, 235, 240, 0.7);
+  pointer-events: none;
+}
+
+.stat i {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: 1px;
+}
+
+.stat b {
+  margin-left: 4px;
+  color: rgba(230, 250, 250, 0.95);
+  font-variant-numeric: tabular-nums;
+}
+
+[data-kind='organic'] i {
+  background: rgb(170, 255, 160);
+  box-shadow: 0 0 6px rgb(170, 255, 160);
+}
+
+[data-kind='lipid'] i {
+  background: rgb(255, 200, 110);
+}
+
+[data-kind='mineral'] i {
+  background: rgb(170, 180, 255);
+  border-radius: 1px;
+  transform: rotate(45deg);
+}
+
+#fps {
+  margin-top: 4px;
+  font-size: 10px;
+  opacity: 0.5;
+}
+
+#hint {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(28px + env(safe-area-inset-bottom));
+  text-align: center;
+  font-size: 13px;
+  color: rgba(200, 235, 240, 0.65);
+  pointer-events: none;
+  transition: opacity 1.2s;
+}
+
+#hint.hidden {
+  opacity: 0;
 }
