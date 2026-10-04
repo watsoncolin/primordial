@@ -19,6 +19,8 @@ export interface Nutrient {
   spin: number
   sides: number
   dead: boolean
+  /** Seconds before this can be absorbed (lets a rupture's spray fly out first). */
+  grace: number
 }
 
 /** How quickly each kind matches the local flow (1/s), and what fraction of it carries them. */
@@ -51,7 +53,7 @@ export class Nutrients {
     this.recount()
   }
 
-  spawn(kind: Kind, x: number, y: number, vx = 0, vy = 0) {
+  spawn(kind: Kind, x: number, y: number, vx = 0, vy = 0, grace = 0) {
     const r = kind === 'organic' ? rand(1.2, 2.2) : kind === 'lipid' ? rand(2.5, 4.5) : rand(2.2, 3.8)
     this.items.push({
       kind,
@@ -65,6 +67,7 @@ export class Nutrients {
       spin: rand(-1.5, 1.5),
       sides: Math.random() < 0.5 ? 5 : 6,
       dead: false,
+      grace,
     })
   }
 
@@ -102,6 +105,7 @@ export class Nutrients {
     }
 
     for (const n of this.items) {
+      n.grace = Math.max(0, n.grace - dt)
       fluid.sample(n.x, n.y)
       const k = Math.min(1, COUPLING[n.kind] * dt)
       const carry = CARRY[n.kind]

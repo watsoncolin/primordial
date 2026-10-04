@@ -1,6 +1,7 @@
-import { WORLD, tuning } from './config'
+import type { Brain } from './ai'
+import { EAT_RATIO, MASS_EXPONENT, PROTOCELL_RADIUS, WORLD, tuning } from './config'
 import type { Fluid } from './fluid'
-import { TAU, rand } from './math'
+import { TAU, rand, wrapDelta } from './math'
 import type { Kind } from './nutrients'
 import { glowSprite } from './sprites'
 import type { Vent } from './vents'
@@ -23,7 +24,50 @@ interface Blob extends Body {
 }
 
 const POINTS = 28
-const INNER_RGB = ['255,214,170', '255,170,190', '200,240,255']
+/** Seconds an engulfed cell takes to be drawn in and dissolved. */
+const ENGULF_TIME = 0.5
+
+export type Species = 'player' | 'grazer' | 'engulfer'
+
+/** Colours as "r,g,b" strings so alpha can be set per use. */
+interface Palette {
+  rim: string
+  glow: string
+  highlight: string
+  body: string
+  aura: [number, number, number] | null
+  inner: string[]
+}
+
+const PALETTES: Record<Species, Palette> = {
+  player: {
+    rim: '175,255,235',
+    glow: '120,240,220',
+    highlight: '200,255,245',
+    body: '95,210,200',
+    aura: [110, 230, 210],
+    inner: ['255,214,170', '255,170,190', '200,240,255'],
+  },
+  grazer: {
+    rim: '150,205,255',
+    glow: '110,170,240',
+    highlight: '200,225,255',
+    body: '80,140,210',
+    aura: null,
+    inner: ['210,230,255', '180,255,220'],
+  },
+  engulfer: {
+    rim: '255,160,195',
+    glow: '240,110,160',
+    highlight: '255,215,230',
+    body: '200,80,135',
+    aura: [240, 90, 140],
+    inner: ['255,190,150', '255,120,160', '230,150,255', '255,220,190', '255,140,120'],
+  },
+}
+
+/** Thrust multiplier per species; engulfers are big and lazy. */
+const THRUST_SCALE: Record<Species, number> = { player: 1, grazer: 0.85, engulfer: 0.8 }
 export const NUTRIENT_RGB: Record<Kind, string> = {
   organic: '170,255,160',
   lipid: '255,200,110',
@@ -31,7 +75,7 @@ export const NUTRIENT_RGB: Record<Kind, string> = {
 }
 
 /**
- * The player: a ring of membrane points held in shape by shape-matching springs.
+ * A protocell (the player or any other): a ring of membrane points held in shape by shape-matching springs.
  * Drag is applied per point and is heavier on the side facing the flow, and thrust pushes
  * mostly from the rear, so the body flattens, stretches and wobbles as it swims.
  */
@@ -39,8 +83,23 @@ export class Protocell {
   readonly pts: Body[] = []
   readonly inner: Blob[] = []
   readonly digesting: Blob[] = []
+  readonly species: Species
+  readonly palette: Palette
+  /** Size in units of the player's starting biomass. Radius ∝ sqrt(biomass). */
+  biomass: number
   R: number
   targetR: number
+  /** Set when a bigger cell has started engulfing this one. */
+  engulfedBy: Protocell | null = null
+  engulfT = 0
+  /** Fully absorbed (or ruptured); remove from the world. */
+  gone = false
+  brain: Brain | null = null
+  /** Temporary thrust multiplier (an engulfer's lunge). */
+  boost = 1
+  /** Last steering input, for the fluid jet. */
+  steerX = 0
+  steerY = 0
   cx = 0
   cy = 0
   cvx = 0
@@ -55,24 +114,31 @@ export class Protocell {
   private readonly weight = new Float32Array(POINTS)
   private readonly sx = new Float32Array(POINTS)
   private readonly sy = new Float32Array(POINTS)
-  private readonly aura = glowSprite(110, 230, 210)
+  private readonly aura: HTMLCanvasElement | null
   private flash = 0
+  private engulfStartR = 0
 
-  constructor(x: number, y: number, r: number) {
-    this.R = this.targetR = r
+  constructor(x: number, y: number, biomass: number, species: Species) {
+    this.species = species
+    this.palette = PALETTES[species]
+    this.aura = this.palette.aura ? glowSprite(...this.palette.aura) : null
+    this.biomass = biomass
+    const r = (this.R = this.targetR = PROTOCELL_RADIUS * Math.sqrt(biomass))
     for (let i = 0; i < POINTS; i++) {
       const a = (i / POINTS) * TAU
       this.restX[i] = Math.cos(a)
       this.restY[i] = Math.sin(a)
       this.pts.push({ x: x + this.restX[i] * r, y: y + this.restY[i] * r, vx: 0, vy: 0 })
     }
-    for (const rgb of INNER_RGB) {
+    const innerCount = species === 'engulfer' ? 5 : species === 'grazer' ? 2 : 3
+    for (let i = 0; i < innerCount; i++) {
+      const rgb = this.palette.inner[i % this.palette.inner.length]
       this.inner.push({
         x: x + rand(-0.3, 0.3) * r,
         y: y + rand(-0.3, 0.3) * r,
         vx: 0,
         vy: 0,
-        r: rand(0.14, 0.19),
+        r: species === 'engulfer' ? rand(0.1, 0.15) : rand(0.14, 0.19),
         rgb,
         life: Infinity,
         maxLife: Infinity,
@@ -82,11 +148,48 @@ export class Protocell {
     this.updateCentroid()
   }
 
+  get screenAlpha() {
+    return this.engulfedBy ? Math.max(0, 1 - this.engulfT / ENGULF_TIME) : 1
+  }
+
+  grow(amount: number) {
+    this.biomass += amount
+    this.targetR = PROTOCELL_RADIUS * Math.sqrt(this.biomass)
+  }
+
+  /** Can this cell swallow `other` whole? */
+  canEat(other: Protocell) {
+    return other.biomass <= this.biomass * EAT_RATIO
+  }
+
+  startEngulf(by: Protocell) {
+    this.engulfedBy = by
+    this.engulfT = 0
+    this.engulfStartR = this.R
+  }
+
   /** `ix, iy` is a unit steering direction, `mag` its 0..1 strength. */
   step(dt: number, fluid: Fluid, ix: number, iy: number, mag: number, time: number, vents: Vent[]) {
-    this.R += (this.targetR - this.R) * Math.min(1, dt * 1.5)
     this.flash = Math.max(0, this.flash - dt * 2.5)
     this.updateCentroid()
+    const eater = this.engulfedBy
+    if (eater) {
+      // Being swallowed: no more swimming, shrink, and get hauled toward the eater's centre.
+      this.engulfT += dt
+      ix = iy = mag = 0
+      this.R = this.engulfStartR * Math.max(0.15, 1 - this.engulfT / ENGULF_TIME)
+      const pullX = wrapDelta(eater.cx - this.cx, WORLD) * 14 - (this.cvx - eater.cvx) * 6
+      const pullY = wrapDelta(eater.cy - this.cy, WORLD) * 14 - (this.cvy - eater.cvy) * 6
+      for (const p of this.pts) {
+        p.vx += pullX * dt
+        p.vy += pullY * dt
+      }
+      if (this.engulfT >= ENGULF_TIME) this.gone = true
+    } else {
+      this.R += (this.targetR - this.R) * Math.min(1, dt * 1.5)
+    }
+    this.steerX = ix
+    this.steerY = iy
     const { cx, cy, cvx, cvy, R, pts, restX, restY, nx, ny, weight } = this
 
     // Best-fit rotation of the rest circle onto the current points (2D shape matching),
@@ -105,7 +208,8 @@ export class Protocell {
 
     // Weak, rhythmic propulsion — a protocell squirms more than it swims.
     const pulse = 1 - tuning.pulse * (0.5 - 0.5 * Math.sin(time * tuning.pulseRate * TAU))
-    const thrust = tuning.thrust * mag * pulse
+    const massFactor = Math.pow(this.biomass, MASS_EXPONENT - 1)
+    const thrust = tuning.thrust * THRUST_SCALE[this.species] * this.boost * massFactor * mag * pulse
     this.thrust = thrust
 
     let wsum = 0
@@ -196,16 +300,62 @@ export class Protocell {
     }
   }
 
+  /** Finish swallowing another cell: its body becomes chunks being digested. */
+  ingestCell(prey: Protocell) {
+    this.grow(prey.biomass * 0.8)
+    const chunks = 3 + Math.round((prey.biomass / this.biomass) * 6)
+    for (let i = 0; i < chunks; i++) {
+      const life = rand(1.5, 3)
+      this.digesting.push({
+        x: this.cx + rand(-0.3, 0.3) * this.R,
+        y: this.cy + rand(-0.3, 0.3) * this.R,
+        vx: prey.cvx,
+        vy: prey.cvy,
+        r: rand(0.07, 0.12),
+        rgb: prey.palette.rim,
+        life,
+        maxLife: life,
+        seed: rand(0, 100),
+      })
+    }
+    this.flash = 1
+  }
+
+  /** Squishy contact: push this cell's membrane points out of `other`'s body. */
+  pushOutOf(other: Protocell) {
+    const r = other.R * 0.95
+    for (const p of this.pts) {
+      const dx = wrapDelta(p.x - other.cx, WORLD)
+      const dy = wrapDelta(p.y - other.cy, WORLD)
+      const d2 = dx * dx + dy * dy
+      if (d2 >= r * r) continue
+      const d = Math.sqrt(d2) || 0.001
+      const nx = dx / d
+      const ny = dy / d
+      // Split the overlap; the other cell does the same from its side.
+      p.x += nx * (r - d) * 0.5
+      p.y += ny * (r - d) * 0.5
+      const vn = (p.vx - other.cvx) * nx + (p.vy - other.cvy) * ny
+      if (vn < 0) {
+        p.vx -= vn * nx
+        p.vy -= vn * ny
+      }
+    }
+  }
+
   draw(ctx: CanvasRenderingContext2D, view: View) {
+    const cx = view.sx(this.cx)
+    const cy = view.sy(this.cy)
+    const R = this.R * view.zoom
+    if (!view.onScreen(cx, cy, R * 2.5)) return
+    const pal = this.palette
+    const alpha = this.screenAlpha
+    ctx.globalAlpha = alpha
     const { sx, sy } = this
     for (let i = 0; i < POINTS; i++) {
       sx[i] = view.sx(this.pts[i].x)
       sy[i] = view.sy(this.pts[i].y)
     }
-    const cx = view.sx(this.cx)
-    const cy = view.sy(this.cy)
-    const R = this.R * view.zoom
-
     // Smooth closed curve through the membrane points.
     const path = new Path2D()
     path.moveTo((sx[POINTS - 1] + sx[0]) / 2, (sy[POINTS - 1] + sy[0]) / 2)
@@ -215,16 +365,18 @@ export class Protocell {
     }
     path.closePath()
 
-    ctx.globalCompositeOperation = 'lighter'
-    ctx.globalAlpha = 0.22 + this.flash * 0.15
-    ctx.drawImage(this.aura, cx - R * 2.4, cy - R * 2.4, R * 4.8, R * 4.8)
-    ctx.globalAlpha = 1
-    ctx.globalCompositeOperation = 'source-over'
+    if (this.aura) {
+      ctx.globalCompositeOperation = 'lighter'
+      ctx.globalAlpha = (0.22 + this.flash * 0.15) * alpha
+      ctx.drawImage(this.aura, cx - R * 2.4, cy - R * 2.4, R * 4.8, R * 4.8)
+      ctx.globalAlpha = alpha
+      ctx.globalCompositeOperation = 'source-over'
+    }
 
     const body = ctx.createRadialGradient(cx - R * 0.35, cy - R * 0.4, R * 0.05, cx, cy, R * 1.05)
-    body.addColorStop(0, 'rgba(200,255,245,0.20)')
-    body.addColorStop(0.6, 'rgba(90,200,190,0.10)')
-    body.addColorStop(1, 'rgba(100,215,205,0.30)')
+    body.addColorStop(0, `rgba(${pal.highlight},0.20)`)
+    body.addColorStop(0.6, `rgba(${pal.body},0.10)`)
+    body.addColorStop(1, `rgba(${pal.body},0.30)`)
     ctx.fillStyle = body
     ctx.fill(path)
 
@@ -239,10 +391,10 @@ export class Protocell {
 
     ctx.lineJoin = 'round'
     ctx.lineWidth = R * 0.2
-    ctx.strokeStyle = `rgba(120,240,220,${0.08 + this.flash * 0.08})`
+    ctx.strokeStyle = `rgba(${pal.glow},${0.08 + this.flash * 0.08})`
     ctx.stroke(path)
     ctx.lineWidth = Math.max(1.5, R * 0.055)
-    ctx.strokeStyle = `rgba(175,255,235,${0.6 + this.flash * 0.3})`
+    ctx.strokeStyle = `rgba(${pal.rim},${0.6 + this.flash * 0.3})`
     ctx.stroke(path)
 
     // Specular highlight.
@@ -252,6 +404,7 @@ export class Protocell {
     ctx.lineWidth = R * 0.07
     ctx.strokeStyle = 'rgba(255,255,255,0.3)'
     ctx.stroke()
+    ctx.globalAlpha = 1
   }
 
   private drawBlob(ctx: CanvasRenderingContext2D, view: View, b: Blob, alpha: number, scale = 1) {
