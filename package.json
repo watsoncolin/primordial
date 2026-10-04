@@ -11,7 +11,8 @@
     "format": "prettier --write .",
     "soak": "tsx scripts/soak.mts",
     "handling": "tsx scripts/handling.mts",
-    "tail": "tsx scripts/tail.mts"
+    "tail": "tsx scripts/tail.mts",
+    "scale": "tsx scripts/scale.mts"
   },
   "devDependencies": {
     "prettier": "^3.9.9",

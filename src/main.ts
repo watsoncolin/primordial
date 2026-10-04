@@ -10,13 +10,13 @@ import { type Kind, Nutrients } from './nutrients'
 import { NUTRIENT_RGB, Protocell, type Species } from './protocell'
 import { type Vent, placeVents } from './vents'
 import { EVOLUTION_COST, TRAITS, type TraitId, type TraitInfo } from './traits'
+import { needsRescale, rescaleWorld } from './rescale'
+import { scale } from './scale'
 import { View } from './view'
 import './style.css'
 
 const STEP = 1 / 60
 const SUBSTEPS = 3
-/** Biomass gained per particle absorbed. Lipids build membrane, so they're what really grows you. */
-const NUTRITION: Record<Kind, number> = { organic: 0.004, lipid: 0.05, mineral: 0.01 }
 const POPULATION_CHECK = 2
 /** Time runs at this fraction of normal speed while you choose an evolution. */
 const CHOICE_TIME_SCALE = 0.12
@@ -46,6 +46,7 @@ let choosing = false
 const npcSteer: Steer = { x: 0, y: 0, mag: 0 }
 
 function reset() {
+  scale.biomass = 1
   fluid = new Fluid()
   vents = placeVents()
   player = new Protocell(WORLD / 2, WORLD / 2, 1, 'player')
@@ -148,6 +149,13 @@ function simulate(dt: number) {
   feed(dt)
   nutrients.sweep()
   if (alive) checkEvolution()
+  if (alive && needsRescale(player)) {
+    const k = rescaleWorld(player, cells, nutrients, vents, fluid, effects)
+    // Everything just shrank by k around the player; zoom in by the same amount so the screen doesn't change.
+    view.zoom /= k
+    view.x = wrapCoord(player.cx + wrapDelta(view.x - player.cx, WORLD) * k, WORLD)
+    view.y = wrapCoord(player.cy + wrapDelta(view.y - player.cy, WORLD) * k, WORLD)
+  }
   dust.step(dt, fluid)
   effects.step(dt)
   if (alive) maintainPopulation(dt)
@@ -249,7 +257,7 @@ function feed(dt: number) {
     const R = cell.R
     const reach = R + 8
     for (const n of nutrients.items) {
-      if (n.dead || n.grace > 0) continue
+      if (n.dead || n.grace > 0 || n.fading) continue
       const dx = wrapDelta(n.x - cell.cx, WORLD)
       const dy = wrapDelta(n.y - cell.cy, WORLD)
       if (Math.abs(dx) > reach + n.r || Math.abs(dy) > reach + n.r) continue
@@ -257,7 +265,7 @@ function feed(dt: number) {
       if (d < R * 0.85) {
         n.dead = true
         cell.ingest(n.kind, cell.cx + dx, cell.cy + dy, n.vx, n.vy)
-        cell.grow(NUTRITION[n.kind] * (cell === player ? 1 : NPC_GROWTH))
+        cell.grow(n.value * (cell === player ? 1 : NPC_GROWTH))
         if (cell === player) {
           effects.ripple(n.x, n.y, NUTRIENT_RGB[n.kind])
           eaten[n.kind]++

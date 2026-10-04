@@ -126,6 +126,14 @@ export class Fluid {
     this.project(tuning.pressureIterations)
   }
 
+  /** Scale all current velocities (the world was rescaled around the player). */
+  scaleVelocity(k: number) {
+    for (let i = 0; i < SIZE; i++) {
+      this.u[i] *= k
+      this.v[i] *= k
+    }
+  }
+
   /** Bilinear velocity at a world position; result in `su`/`sv`. */
   sample(wx: number, wy: number) {
     const gx = wx / this.h - 0.5

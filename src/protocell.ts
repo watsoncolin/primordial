@@ -1,9 +1,10 @@
 import type { Brain } from './ai'
-import { EAT_RATIO, MASS_EXPONENT, PROTOCELL_RADIUS, WORLD, tuning } from './config'
+import { EAT_RATIO, MASS_EXPONENT, WORLD, tuning } from './config'
 import { Flagellum } from './flagellum'
 import type { Fluid } from './fluid'
 import { TAU, clamp, rand, wrapDelta } from './math'
 import type { Kind } from './nutrients'
+import { radiusFor, scale } from './scale'
 import { glowSprite } from './sprites'
 import type { TraitId } from './traits'
 import type { Vent } from './vents'
@@ -131,7 +132,7 @@ export class Protocell {
     this.palette = PALETTES[species]
     this.aura = this.palette.aura ? glowSprite(...this.palette.aura) : null
     this.biomass = biomass
-    const r = (this.R = this.targetR = PROTOCELL_RADIUS * Math.sqrt(biomass))
+    const r = (this.R = this.targetR = radiusFor(biomass))
     for (let i = 0; i < POINTS; i++) {
       const a = (i / POINTS) * TAU
       this.restX[i] = Math.cos(a)
@@ -162,7 +163,7 @@ export class Protocell {
 
   grow(amount: number) {
     this.biomass += amount
-    this.targetR = PROTOCELL_RADIUS * Math.sqrt(this.biomass)
+    this.targetR = radiusFor(this.biomass)
   }
 
   addTrait(id: TraitId) {
@@ -221,7 +222,8 @@ export class Protocell {
     // Weak, rhythmic propulsion — a protocell squirms more than it swims.
     const pulse = 1 - tuning.pulse * (0.5 - 0.5 * Math.sin(time * tuning.pulseRate * TAU))
     // Heavier cells accelerate less; lighter ones don't get a bonus, or small prey would outrun everything.
-    const massFactor = Math.min(1, Math.pow(this.biomass, MASS_EXPONENT - 1))
+    // Relative to the current scale, so handling is the same at 1x and 1000x.
+    const massFactor = Math.min(1, Math.pow(this.biomass / scale.biomass, MASS_EXPONENT - 1))
     const base = tuning.thrust * THRUST_SCALE[this.species] * this.boost * massFactor * mag
     let tx = ix * base * pulse
     let ty = iy * base * pulse
@@ -366,6 +368,26 @@ export class Protocell {
       })
     }
     this.flash = 1
+  }
+
+  /** Shrink this cell toward (ox, oy) by k: the world is being rescaled around the player. */
+  rescale(ox: number, oy: number, k: number) {
+    const ncx = ox + wrapDelta(this.cx - ox, WORLD) * k
+    const ncy = oy + wrapDelta(this.cy - oy, WORLD) * k
+    for (const b of [...this.pts, ...this.inner, ...this.digesting]) {
+      b.x = ncx + (b.x - this.cx) * k
+      b.y = ncy + (b.y - this.cy) * k
+      b.vx *= k
+      b.vy *= k
+    }
+    this.flagellum?.rescale(this.cx, this.cy, ncx, ncy, k)
+    this.cx = ncx
+    this.cy = ncy
+    this.cvx *= k
+    this.cvy *= k
+    this.R *= k
+    this.targetR *= k
+    this.engulfStartR *= k
   }
 
   /** Squishy contact: push this cell's membrane points out of `other`'s body. */

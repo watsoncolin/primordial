@@ -1,6 +1,6 @@
 import { WORLD } from './config'
 import type { Fluid } from './fluid'
-import { TAU, rand, wrapDelta } from './math'
+import { TAU, rand, wrapCoord, wrapDelta } from './math'
 import { MAX_MINERALS, type Nutrients } from './nutrients'
 import { glowSprite } from './sprites'
 import type { View } from './view'
@@ -16,9 +16,9 @@ interface Body {
 
 /** A rocky hydrothermal vent: solid, stirs a slow vortex, and sheds mineral crystals. */
 export class Vent {
-  readonly x: number
-  readonly y: number
-  readonly r: number
+  x: number
+  y: number
+  r: number
   private readonly shape: number[] = []
   private readonly spin = Math.random() < 0.5 ? -1 : 1
   private readonly seed = rand(0, 100)
@@ -47,6 +47,12 @@ export class Vent {
       Math.cos(a) * s,
       Math.sin(a) * s,
     )
+  }
+
+  rescale(ox: number, oy: number, k: number) {
+    this.x = wrapCoord(ox + wrapDelta(this.x - ox, WORLD) * k, WORLD)
+    this.y = wrapCoord(oy + wrapDelta(this.y - oy, WORLD) * k, WORLD)
+    this.r *= k
   }
 
   /** Keep a body outside the rock, killing its inward velocity. */

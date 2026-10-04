@@ -1,6 +1,7 @@
 import { WORLD } from './config'
 import type { Fluid } from './fluid'
 import { TAU, gauss, rand, wrapCoord, wrapDelta } from './math'
+import { scale } from './scale'
 import { glowSprite } from './sprites'
 import type { Vent } from './vents'
 import type { View } from './view'
@@ -21,7 +22,21 @@ export interface Nutrient {
   dead: boolean
   /** Seconds before this can be absorbed (lets a rupture's spray fly out first). */
   grace: number
+  /** Biomass gained by whoever absorbs it. */
+  value: number
+  /** Culled by a rescale: fades out over about a second, can't be eaten, then is removed. */
+  fading: boolean
+  alpha: number
 }
+
+/**
+ * Biomass per particle at scale 1. Lipids build membrane, so they're what really grows you.
+ * Particles spawned at bigger scales stand for bigger clumps of matter and are worth proportionally more.
+ */
+export const NUTRITION: Record<Kind, number> = { organic: 0.004, lipid: 0.05, mineral: 0.01 }
+/** Particles shrunk below this radius by a rescale are too small to matter and dissolve. */
+const MIN_RADIUS = 0.6
+const FADE_TIME = 1.2
 
 /** How quickly each kind matches the local flow (1/s), and what fraction of it carries them. */
 const COUPLING: Record<Kind, number> = { organic: 5, lipid: 2.5, mineral: 1.2 }
@@ -68,6 +83,9 @@ export class Nutrients {
       sides: Math.random() < 0.5 ? 5 : 6,
       dead: false,
       grace,
+      value: NUTRITION[kind] * scale.biomass,
+      fading: false,
+      alpha: 1,
     })
   }
 
@@ -106,6 +124,10 @@ export class Nutrients {
 
     for (const n of this.items) {
       n.grace = Math.max(0, n.grace - dt)
+      if (n.fading) {
+        n.alpha -= dt / FADE_TIME
+        if (n.alpha <= 0) n.dead = true
+      }
       fluid.sample(n.x, n.y)
       const k = Math.min(1, COUPLING[n.kind] * dt)
       const carry = CARRY[n.kind]
@@ -125,6 +147,22 @@ export class Nutrients {
     this.clumpLipids(dt)
   }
 
+  /**
+   * Shrink everything toward (ox, oy) by k. A random share is culled so density near the player
+   * stays the same; the emptied outer band refills with fresh particles at the new scale.
+   */
+  rescale(ox: number, oy: number, k: number) {
+    for (const n of this.items) {
+      n.x = wrapCoord(ox + wrapDelta(n.x - ox, WORLD) * k, WORLD)
+      n.y = wrapCoord(oy + wrapDelta(n.y - oy, WORLD) * k, WORLD)
+      n.vx *= k
+      n.vy *= k
+      n.r *= k
+      if (n.r < MIN_RADIUS || Math.random() > k * k) n.fading = true
+    }
+    this.recount()
+  }
+
   /** Drop absorbed items and refresh counts. */
   sweep() {
     this.items = this.items.filter(n => !n.dead)
@@ -140,6 +178,7 @@ export class Nutrients {
       const sy = view.sy(n.y)
       const s = n.r * z
       if (!view.onScreen(sx, sy, s * 2)) continue
+      ctx.globalAlpha = n.alpha
       ctx.beginPath()
       for (let i = 0; i < n.sides; i++) {
         const a = n.angle + (i / n.sides) * TAU
@@ -154,6 +193,7 @@ export class Nutrients {
       ctx.strokeStyle = 'rgba(220,228,255,0.85)'
       ctx.stroke()
     }
+    ctx.globalAlpha = 1
 
     for (const n of this.items) {
       if (n.kind !== 'lipid') continue
@@ -161,6 +201,7 @@ export class Nutrients {
       const sy = view.sy(n.y)
       const s = n.r * z
       if (!view.onScreen(sx, sy, s * 2)) continue
+      ctx.globalAlpha = n.alpha
       ctx.beginPath()
       ctx.arc(sx, sy, s, 0, TAU)
       ctx.fillStyle = 'rgba(255,196,92,0.2)'
@@ -169,7 +210,7 @@ export class Nutrients {
       ctx.strokeStyle = 'rgba(255,214,140,0.75)'
       ctx.stroke()
       // Oily shimmer.
-      ctx.globalAlpha = 0.35 + 0.45 * (0.5 + 0.5 * Math.sin(time * 2.4 + n.phase))
+      ctx.globalAlpha = (0.35 + 0.45 * (0.5 + 0.5 * Math.sin(time * 2.4 + n.phase))) * n.alpha
       ctx.beginPath()
       ctx.arc(sx - s * 0.35, sy - s * 0.35, s * 0.28, 0, TAU)
       ctx.fillStyle = '#fff6dc'
@@ -184,7 +225,7 @@ export class Nutrients {
       const sy = view.sy(n.y)
       const s = n.r * z * 6
       if (!view.onScreen(sx, sy, s)) continue
-      ctx.globalAlpha = 0.55 + 0.35 * Math.sin(time * 3 + n.phase)
+      ctx.globalAlpha = (0.55 + 0.35 * Math.sin(time * 3 + n.phase)) * n.alpha
       ctx.drawImage(this.organicGlow, sx - s / 2, sy - s / 2, s, s)
     }
     ctx.globalAlpha = 1
@@ -230,6 +271,6 @@ export class Nutrients {
 
   private recount() {
     this.count.organic = this.count.lipid = this.count.mineral = 0
-    for (const n of this.items) this.count[n.kind]++
+    for (const n of this.items) if (!n.fading) this.count[n.kind]++
   }
 }

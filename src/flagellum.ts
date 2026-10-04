@@ -81,6 +81,14 @@ export class Flagellum {
     return this.y[Math.round(SEGMENTS * 0.66)]
   }
 
+  /** Follow the body through a world rescale: (ox, oy) old centre, (nx, ny) new centre. */
+  rescale(ox: number, oy: number, nx: number, ny: number, k: number) {
+    for (let i = 0; i <= SEGMENTS; i++) {
+      this.x[i] = nx + (this.x[i] - ox) * k
+      this.y[i] = ny + (this.y[i] - oy) * k
+    }
+  }
+
   shift(dx: number, dy: number) {
     for (let i = 0; i <= SEGMENTS; i++) {
       this.x[i] += dx

@@ -36,6 +36,11 @@ export class Effects {
     this.shards.push({ x, y, vx, vy, angle, spin: (Math.random() - 0.5) * 6, len, age: 0, life: 1.2, rgb })
   }
 
+  clear() {
+    this.ripples = []
+    this.shards = []
+  }
+
   step(dt: number) {
     for (const r of this.ripples) r.age += dt
     this.ripples = this.ripples.filter(r => r.age < r.life)

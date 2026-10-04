@@ -154,7 +154,7 @@ function nearestFood(cell: Protocell, nutrients: Nutrients, range: number) {
   let best: Nutrient | null = null
   let bestD = range * range
   for (const n of nutrients.items) {
-    if (n.kind === 'mineral') continue
+    if (n.kind === 'mineral' || n.fading) continue
     const dx = wrapDelta(n.x - cell.cx, WORLD)
     if (dx > range || dx < -range) continue
     const dy = wrapDelta(n.y - cell.cy, WORLD)
