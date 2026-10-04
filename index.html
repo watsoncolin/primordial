@@ -17,6 +17,7 @@
       <div class="stat" data-kind="organic"><i></i>organics <b>0</b></div>
       <div class="stat" data-kind="lipid"><i></i>lipids <b>0</b></div>
       <div class="stat" data-kind="mineral"><i></i>minerals <b>0</b></div>
+      <div class="stat" id="generation">generation <b></b></div>
       <div class="stat" id="biomass">biomass <b>×1.00</b></div>
       <div class="stat" id="goal">transition <b></b></div>
       <div id="mutations"></div>
@@ -54,15 +55,34 @@
       <p class="stats"></p>
       <p class="mutations"></p>
       <p class="discovered"></p>
-      <button type="button" class="primary" data-action="again">Begin a new protocell <kbd>Enter</kbd></button>
+      <p class="dna"></p>
+      <div class="actions">
+        <button type="button" data-action="tree">Tree of Life <kbd>L</kbd></button>
+        <button type="button" class="primary" data-action="again">Begin the next generation <kbd>Enter</kbd></button>
+      </div>
     </div>
     <div id="death">
       <h1>Membrane ruptured</h1>
       <p class="cause"></p>
       <p class="stats"></p>
-      <p class="again">Tap to begin again</p>
+      <p class="again">Tap to begin again · L for the Tree of Life</p>
     </div>
     <button id="sound" type="button"></button>
+    <button id="tree-btn" type="button">tree of life <kbd>L</kbd></button>
+    <div id="tree">
+      <header>
+        <h1>Tree of Life</h1>
+        <p class="summary"></p>
+        <button type="button" data-action="close">Close <kbd>Esc</kbd></button>
+      </header>
+      <div class="body">
+        <div class="canvas"><svg></svg></div>
+        <aside>
+          <div class="detail"></div>
+          <div class="shop"></div>
+        </aside>
+      </div>
+    </div>
     <div id="hint">Hold and drag to swim · WASD on a keyboard</div>
     <script type="module" src="/src/main.ts"></script>
   </body>

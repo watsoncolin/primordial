@@ -75,7 +75,11 @@ export interface Lineage {
   name: string
   form: string
   formation: Formation
+  /** Which branch shaped it: one branch, 'hybrid' for an even pair, or 'none' for a generalist. */
+  branch: Branch | 'hybrid' | 'none'
 }
+
+export type { Branch }
 
 /** Rarer outcomes when two branches are evenly matched. Keyed by the two branches, sorted. */
 const HYBRID: Record<string, string> = {
@@ -114,6 +118,7 @@ export function lineageFor(traits: TraitId[]): Lineage {
     name,
     form,
     formation: branches.some(b => b === 'predation' || b === 'mobility') ? 'chain' : 'cluster',
+    branch: branches.length === 2 ? 'hybrid' : (branches[0] ?? 'none'),
   }
 }
 

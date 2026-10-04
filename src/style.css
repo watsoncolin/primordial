@@ -497,3 +497,248 @@ kbd {
   font-size: 11px;
   cursor: pointer;
 }
+
+#tree-btn {
+  position: fixed;
+  right: calc(88px + env(safe-area-inset-right));
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  padding: 4px 8px;
+  border: 1px solid rgba(200, 235, 240, 0.25);
+  border-radius: 8px;
+  background: rgba(4, 20, 28, 0.5);
+  color: rgba(200, 235, 240, 0.6);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+#lineage .dna {
+  margin: 2px 0 12px;
+  font-size: 13px;
+  color: rgba(175, 255, 235, 0.9);
+}
+
+#tree {
+  position: fixed;
+  inset: 0;
+  /* Above the HUD, hint and the tuning panel. */
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
+  background: rgba(3, 12, 17, 0.94);
+  color: rgba(220, 240, 245, 0.88);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.4s;
+}
+
+#tree.shown {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+#tree header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(175, 255, 235, 0.15);
+}
+
+#tree h1 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: rgba(175, 255, 235, 0.9);
+}
+
+#tree .summary {
+  flex: 1;
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+#tree header button,
+#tree .unlock button {
+  padding: 5px 10px;
+  border: 1px solid rgba(175, 255, 235, 0.35);
+  border-radius: 8px;
+  background: rgba(10, 40, 46, 0.7);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#tree .unlock button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+#tree .body {
+  display: flex;
+  flex: 1;
+  gap: 20px;
+  min-height: 0;
+  padding-top: 12px;
+}
+
+#tree .canvas {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+#tree svg {
+  display: block;
+  width: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+}
+
+#tree svg text {
+  fill: rgba(220, 240, 245, 0.85);
+  font-size: 12px;
+}
+
+#tree svg text.name {
+  font-style: italic;
+  font-size: 13px;
+}
+
+#tree svg text.gen,
+#tree svg text.here {
+  font-size: 10px;
+  fill: rgba(220, 240, 245, 0.5);
+}
+
+#tree svg text.root {
+  font-size: 10px;
+  letter-spacing: 0.3em;
+  fill: rgba(175, 255, 235, 0.6);
+}
+
+#tree svg .pick {
+  cursor: pointer;
+}
+
+#tree svg .bud {
+  animation: bud 2s ease-in-out infinite;
+}
+
+@keyframes bud {
+  50% {
+    opacity: 0.4;
+  }
+}
+
+#tree aside {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: 300px;
+  overflow-y: auto;
+}
+
+#tree h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+#tree .detail h3 {
+  font-style: italic;
+  font-size: 18px;
+}
+
+#tree .detail .form,
+#tree .detail .empty {
+  margin: 0 0 10px;
+  font-size: 13px;
+  opacity: 0.8;
+}
+
+#tree dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+
+#tree dt {
+  opacity: 0.55;
+}
+
+#tree dd {
+  margin: 0;
+}
+
+#tree .unlock {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 10px;
+  align-items: center;
+  padding: 8px 0;
+  border-top: 1px solid rgba(175, 255, 235, 0.1);
+  font-size: 12px;
+}
+
+#tree .unlock span {
+  grid-column: 1;
+  opacity: 0.7;
+}
+
+#tree .unlock button {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+}
+
+#tree .unlock.owned strong {
+  color: rgba(175, 255, 235, 0.95);
+}
+
+#tree .unlock select {
+  grid-column: 1 / -1;
+  margin-top: 6px;
+  padding: 4px;
+  border: 1px solid rgba(175, 255, 235, 0.3);
+  border-radius: 6px;
+  background: rgba(10, 40, 46, 0.9);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+}
+
+@media (max-width: 700px) {
+  #tree .body {
+    flex-direction: column;
+  }
+
+  #tree aside {
+    width: auto;
+    max-height: 45%;
+  }
+}
+
+#evolve.mutant h1 {
+  color: rgba(210, 170, 255, 0.95);
+}
+
+#evolve.mutant .card {
+  border-color: rgba(200, 150, 255, 0.35);
+  background: rgba(34, 16, 50, 0.75);
+}
+
+#evolve.mutant .card .icon {
+  color: rgba(210, 170, 255, 0.9);
+}
+
+#generation {
+  margin-bottom: 4px;
+}

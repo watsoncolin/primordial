@@ -42,7 +42,9 @@ import {
   STICKY_REACH,
   rollMutation,
 } from './mutations'
+import { type DnaLine, type RunRecord, dnaFor, loadSave, writeSave } from './save'
 import { Senses } from './senses'
+import { TreeOfLife } from './tree'
 import {
   ASSEMBLY_TIME,
   COLONY_CELLS,
@@ -71,6 +73,8 @@ const ctx = canvas.getContext('2d')!
 const view = new View()
 const input = new Input(canvas)
 const sound = new Sound()
+/** Progress that outlives a run: DNA, generations, unlocks and the Tree of Life's records. */
+const save = loadSave()
 
 /** Stereo position for something at world x, from where it is on screen. */
 function panAt(x: number) {
@@ -87,6 +91,9 @@ let effects: Effects
 let senses: Senses
 let eaten: Record<Kind, number>
 let cellsEaten = 0
+let peakBiomass = 1
+/** Evolutions granted for free (Genetic Memory); they don't push up the mineral cost of the next one. */
+let freeEvolutions = 0
 /** Hidden mutagen meter: fills from minerals, meals and injuries; a mutation hits when it's full. */
 let mutagen = 0
 let mutagenNeeded = MUTAGEN_FIRST
@@ -168,6 +175,8 @@ function reset() {
   senses = new Senses()
   eaten = { organic: 0, lipid: 0, mineral: 0 }
   cellsEaten = 0
+  peakBiomass = 1
+  freeEvolutions = 0
   mutagen = 0
   mutagenNeeded = MUTAGEN_FIRST
   leakTimer = 0
@@ -194,7 +203,13 @@ function reset() {
   view.y = player.cy
   view.zoom = targetZoom()
   hud.death.classList.remove('shown')
+  // Prestige unlocks shape the start of every run.
+  if (save.unlocks.includes('heritableMutation') && save.inherited) player.addMutation(save.inherited)
   updateHud()
+  if (save.unlocks.includes('geneticMemory')) {
+    freeEvolutions = 1
+    openChoice(evolutionOptions(), 'Genetic Memory', 'Your ancestors remember. Choose where to begin.')
+  }
 }
 
 /** New cells are sized relative to the player, so the ecosystem keeps pace as you grow. */
@@ -306,6 +321,7 @@ function simulate(dt: number) {
   if (living) checkEvolution()
   if (alive) advanceTransition(dt)
   if (living) mutationEffects(dt)
+  if (living) peakBiomass = Math.max(peakBiomass, player.biomass)
   if (living && needsRescale(player)) {
     const k = rescaleWorld(player, cells, nutrients, vents, fluid, effects)
     // Everything just shrank by k around the player; zoom in by the same amount so the screen doesn't change.
@@ -545,6 +561,7 @@ function drawTendril() {
 function rupture(cell: Protocell, eater: Protocell) {
   cell.gone = true
   deathTime = time
+  recordRun('extinct', [])
   sound.rupture(panAt(cell.cx))
   haptic([60, 40, 140])
   const organics = clamp(Math.round(cell.biomass * 50), 35, 140)
@@ -633,12 +650,43 @@ function addMutagen(amount: number) {
   if (mutagen >= mutagenNeeded) mutate()
 }
 
-/** Something changes, whether you like it or not. */
+/** Something changes, whether you like it or not (or, with Directed Mutation, which of two ways). */
 function mutate(forced?: MutationInfo) {
   const m = forced ?? rollMutation(player.mutations, player.traits)
   if (!m) return
   mutagen = Math.max(0, mutagen - mutagenNeeded)
   mutagenNeeded += MUTAGEN_STEP
+  if (!forced && save.unlocks.includes('directedMutation') && !choosing) {
+    const other = rollMutation(new Set([...player.mutations, m.id]), player.traits)
+    if (other) {
+      sound.mutation()
+      haptic([20, 60, 20])
+      openCards(
+        'Mutation',
+        'Something in you is changing. You can steer which way.',
+        [m, other].map(option => ({
+          icon: MUTATION_ICON,
+          name: option.name,
+          tagline: `+ ${option.good}`,
+          detail: `− ${option.bad}`,
+          pick: () => {
+            closeChoice()
+            applyMutation(option)
+          },
+        })),
+        true,
+      )
+      return
+    }
+  }
+  applyMutation(m)
+}
+
+const MUTATION_ICON =
+  '<svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">' +
+  '<circle cx="32" cy="32" r="15"/><path d="M24 22c6 4 10 16 16 20M40 22c-6 4-10 16-16 20" stroke-width="2"/></svg>'
+
+function applyMutation(m: MutationInfo) {
   player.addMutation(m.id)
   mutationSlow = 0.8
   sound.mutation()
@@ -885,6 +933,30 @@ function holdFormation(dt: number) {
   }
 }
 
+/** Remember a finished run on the Tree of Life (and bank its DNA). */
+function recordRun(outcome: RunRecord['outcome'], dna: DnaLine[], name = '', form = '') {
+  peakBiomass = Math.max(peakBiomass, player.biomass)
+  const total = dna.reduce((sum, l) => sum + l.amount, 0)
+  save.runs.push({
+    outcome,
+    generation: save.generation,
+    name,
+    form,
+    traits: [...player.traits],
+    mutations: [...player.mutations],
+    seconds: Math.round(time - startTime),
+    peakBiomass,
+    cellsEaten,
+    dna: total,
+    date: Date.now(),
+  })
+  save.dna += total
+  if (outcome === 'lineage') save.generation++
+  writeSave(save)
+  updateHud()
+  return total
+}
+
 function mutationList() {
   const names = [...player.mutations].map(id => MUTATIONS[id].name)
   return names.length ? `Mutations: ${names.join(', ')}` : ''
@@ -902,16 +974,27 @@ function completeTransition() {
   hud.lineageForm.textContent = `It became ${result.form}.`
   hud.lineageMutations.textContent = mutationList()
   hud.lineageStats.textContent =
-    `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} · peak biomass ×${player.biomass.toFixed(1)} · ` +
+    `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} · peak biomass ×${peakBiomass.toFixed(1)} · ` +
     `${cellsEaten} cells absorbed · ${evolutions} evolutions · ${colony.length} of ${COLONY_CELLS} cells survived`
   hud.lineageDiscovered.textContent =
     discovered === null ? '' : `${discovered} ${discovered === 1 ? 'lineage' : 'lineages'} discovered`
+  peakBiomass = Math.max(peakBiomass, player.biomass)
+  const dna = dnaFor({
+    cellsEaten,
+    evolutions,
+    mutations: player.mutations.size,
+    survivors: colony.length,
+    peakBiomass,
+  })
+  const total = recordRun('lineage', dna, result.name, result.form)
+  hud.lineageDna.textContent = `+${total} DNA  (${dna.map(l => `${l.label.toLowerCase()} ${l.amount}`).join(' · ')})`
   hud.lineage.classList.add('shown')
   effects.ripple(focus.x, focus.y, player.palette.rim, 2)
 }
 
 function failTransition() {
   deathTime = time
+  recordRun('extinct', [])
   sound.rupture(0)
   hud.banner.classList.remove('shown')
   const seconds = Math.round(time - startTime)
@@ -952,17 +1035,17 @@ function drawBridges() {
 }
 
 function nextEvolutionCost() {
-  return EVOLUTION_COST[Math.min(evolutions, EVOLUTION_COST.length - 1)]
+  return EVOLUTION_COST[clamp(evolutions - freeEvolutions, 0, EVOLUTION_COST.length - 1)]
 }
 
-/** Traits the player could still evolve, in random order, at most three. */
+/** Traits the player could still evolve, in random order: three, or four with Wider Options. */
 function evolutionOptions(): TraitInfo[] {
   const open = availableTraits(player.traits, player.mutations)
   for (let i = open.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1))
     ;[open[i], open[j]] = [open[j], open[i]]
   }
-  return open.slice(0, 3)
+  return open.slice(0, save.unlocks.includes('widerOptions') ? 4 : 3)
 }
 
 /** Debug: skip the mineral requirement. */
@@ -977,26 +1060,63 @@ function checkEvolution() {
   if (options.length) openChoice(options)
 }
 
-/** Slow time and offer the evolution cards. */
-function openChoice(options: TraitInfo[]) {
+interface CardSpec {
+  icon: string
+  name: string
+  /** Small caps line under the name, e.g. what it evolves from. */
+  note?: string
+  tagline: string
+  detail: string
+  pick: () => void
+}
+
+/** Slow time and lay out cards to choose from (evolutions, or mutations with Directed Mutation). */
+function openCards(title: string, subtitle: string, specs: CardSpec[], mutant = false) {
   choosing = true
   input.release()
+  hud.evolveTitle.textContent = title
+  hud.evolveSubtitle.textContent = subtitle
+  hud.evolve.classList.toggle('mutant', mutant)
   hud.cards.replaceChildren(
-    ...options.map((trait, i) => {
+    ...specs.map((spec, i) => {
       const card = document.createElement('button')
       card.className = 'card'
       card.innerHTML =
-        `<span class="icon">${TRAIT_ICONS[trait.id]}</span>` +
-        `<span class="name">${trait.name}</span>` +
-        (trait.requires ? `<span class="lineage">evolves from ${TRAITS[trait.requires].name}</span>` : '') +
-        `<span class="tagline">${trait.tagline}</span>` +
-        `<span class="detail">${trait.detail}</span>` +
+        `<span class="icon">${spec.icon}</span>` +
+        `<span class="name">${spec.name}</span>` +
+        (spec.note ? `<span class="lineage">${spec.note}</span>` : '') +
+        `<span class="tagline">${spec.tagline}</span>` +
+        `<span class="detail">${spec.detail}</span>` +
         `<span class="key">${i + 1}</span>`
-      card.addEventListener('click', () => choose(trait.id))
+      card.addEventListener('click', spec.pick)
       return card
     }),
   )
   hud.evolve.classList.add('shown')
+}
+
+function openChoice(
+  options: TraitInfo[],
+  title = 'Evolution',
+  subtitle = 'Your protocell has gathered enough minerals to change.',
+) {
+  if (!options.length) return
+  openCards(
+    title,
+    subtitle,
+    options.map(trait => ({
+      icon: TRAIT_ICONS[trait.id],
+      name: trait.name,
+      note: trait.requires
+        ? `evolves from ${TRAITS[trait.requires].name}`
+        : trait.requiresMutation
+          ? `from your ${MUTATIONS[trait.requiresMutation].name}`
+          : undefined,
+      tagline: trait.tagline,
+      detail: trait.detail,
+      pick: () => choose(trait.id),
+    })),
+  )
 }
 
 function closeChoice() {
@@ -1141,6 +1261,12 @@ const hud = {
   deathCause: document.querySelector<HTMLElement>('#death .cause')!,
   deathStats: document.querySelector<HTMLElement>('#death .stats')!,
   evolve: document.querySelector<HTMLElement>('#evolve')!,
+  evolveTitle: document.querySelector<HTMLElement>('#evolve h1')!,
+  evolveSubtitle: document.querySelector<HTMLElement>('#evolve > p')!,
+  generation: document.querySelector<HTMLElement>('#generation b')!,
+  lineageDna: document.querySelector<HTMLElement>('#lineage .dna')!,
+  treeBtn: document.querySelector<HTMLButtonElement>('#tree-btn')!,
+  tree: document.querySelector<HTMLElement>('#tree')!,
   deathTitle: document.querySelector<HTMLElement>('#death h1')!,
   transitionBtn: document.querySelector<HTMLButtonElement>('#transition-btn')!,
   banner: document.querySelector<HTMLElement>('#banner')!,
@@ -1162,6 +1288,7 @@ const hud = {
 }
 
 function updateHud() {
+  hud.generation.textContent = `${save.generation} · ${save.dna} DNA`
   hud.mutations.textContent = [...player.mutations].map(id => MUTATIONS[id].name).join(' · ')
   hud.organic.textContent = String(eaten.organic)
   hud.lipid.textContent = String(eaten.lipid)
@@ -1173,10 +1300,32 @@ function updateHud() {
     `×${Math.min(player.biomass, TRANSITION_BIOMASS).toFixed(1)}/×${TRANSITION_BIOMASS}`
 }
 
+const tree = new TreeOfLife(hud.tree, save, () => updateHud())
+
+function openTree() {
+  if (choosing || confirming) return
+  input.release()
+  tree.open()
+}
+
 /** After dying, any tap or key starts a new protocell (with a short pause so the burst can play). */
-function tryRestart() {
+function tryRestart(e: Event) {
+  if (tree.isOpen) return
+  if (e instanceof KeyboardEvent && ['l', 'm', 'escape'].includes(e.key.toLowerCase())) return
   if (deathTime !== null && time - deathTime > 1.2) reset()
 }
+hud.treeBtn.addEventListener('click', openTree)
+hud.lineage.querySelector('[data-action="tree"]')!.addEventListener('click', openTree)
+window.addEventListener('keydown', e => {
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return
+  const key = e.key.toLowerCase()
+  if (key === 'l') {
+    if (tree.isOpen) tree.close()
+    else openTree()
+  } else if (key === 'escape' && tree.isOpen) {
+    tree.close()
+  }
+})
 function toggleSound() {
   const muted = sound.toggleMute()
   hud.sound.textContent = muted ? 'sound off' : 'sound on'
@@ -1245,8 +1394,10 @@ function frame(now: number) {
   const elapsed = Math.min((now - last) / 1000, 0.1)
   last = now
   mutationSlow = Math.max(0, mutationSlow - elapsed)
-  acc +=
-    elapsed * (choosing || confirming ? CHOICE_TIME_SCALE : phase === 'complete' ? 0.5 : mutationSlow > 0 ? 0.3 : 1)
+  if (tree.isOpen) acc = 0
+  else
+    acc +=
+      elapsed * (choosing || confirming ? CHOICE_TIME_SCALE : phase === 'complete' ? 0.5 : mutationSlow > 0 ? 0.3 : 1)
   let steps = 0
   while (acc >= STEP && steps < 3) {
     simulate(STEP)
