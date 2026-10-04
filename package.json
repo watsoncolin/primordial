@@ -8,10 +8,12 @@
     "build": "tsc && vite build",
     "preview": "vite preview --host",
     "typecheck": "tsc",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "soak": "tsx scripts/soak.mts"
   },
   "devDependencies": {
     "prettier": "^3.9.9",
+    "tsx": "^4.23.15",
     "typescript": "~6.0.2",
     "vite": "^8.3.0"
   },
