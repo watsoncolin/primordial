@@ -69,7 +69,8 @@ for (let s = 0; s < seconds * 60; s++) {
   for (const c of cells) {
     let max = 0
     for (const p of c.pts) max = Math.max(max, Math.hypot(p.x - c.cx, p.y - c.cy))
-    const bad = !Number.isFinite(max) || max > c.R * 2.5
+    // Cells being swallowed shrink fast and legitimately lag their outline, so skip them.
+    const bad = !c.engulfedBy && (!Number.isFinite(max) || max > c.R * 2.5)
     if (bad && !reported.has(c)) {
       reported.add(c)
       console.log(
