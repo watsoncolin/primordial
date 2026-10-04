@@ -7,7 +7,7 @@ const { Protocell } = await import('../src/protocell.ts')
 const { tuning, WORLD } = await import('../src/config.ts')
 
 tuning.currentStrength = 0 // still water, so numbers are comparable
-for (const traits of [[], ['flagellum']] as const) {
+for (const traits of [[], ['flagellum'], ['membrane']] as const) {
   const f = new Fluid()
   const c = new Protocell(WORLD / 2, WORLD / 2, 1, 'player')
   for (const t of traits) c.addTrait(t)
@@ -23,11 +23,12 @@ for (const traits of [[], ['flagellum']] as const) {
     }
     return Infinity
   }
+  const toSpeed = run(5, 1, 0, () => Math.hypot(c.cvx, c.cvy) > 50)
   run(5, 1, 0)
   const top = Math.hypot(c.cvx, c.cvy)
   // Reverse: time until velocity points mostly left at decent speed.
   const reverse = run(10, -1, 0, () => c.cvx < -top * 0.5)
   console.log(
-    `${traits.join('+') || 'none'}: top speed ${top.toFixed(0)}, reverse to half speed ${reverse.toFixed(2)}s`,
+    `${traits.join('+') || 'none'}: 0→50 in ${toSpeed.toFixed(2)}s, top speed ${top.toFixed(0)}, reverse to half speed ${reverse.toFixed(2)}s`,
   )
 }

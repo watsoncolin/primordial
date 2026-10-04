@@ -13,7 +13,6 @@ import { EVOLUTION_COST, TRAITS, type TraitId, type TraitInfo } from './traits'
 import { needsRescale, rescaleWorld } from './rescale'
 import { scale } from './scale'
 import { View } from './view'
-import './style.css'
 
 const STEP = 1 / 60
 const SUBSTEPS = 3
@@ -115,6 +114,7 @@ function targetZoom() {
 function simulate(dt: number) {
   time += dt
   const alive = deathTime === null
+  if (alive) aimPseudopod(player)
 
   for (const cell of cells) {
     if (cell.gone) continue
@@ -171,16 +171,17 @@ function interact() {
       if (b.engulfedBy || b.gone) continue
       const dx = wrapDelta(b.cx - a.cx, WORLD)
       const dy = wrapDelta(b.cy - a.cy, WORLD)
-      const reach = a.R + b.R
+      const reach = Math.max(a.grabRadius, a.R) + Math.max(b.grabRadius, b.R)
       if (dx > reach || dx < -reach || dy > reach || dy < -reach) continue
       const d = Math.hypot(dx, dy)
       if (d > reach) continue
-      // Swallowing starts once the prey's centre reaches the membrane; the engulf pulls it the rest of the way.
-      if (a.canEat(b)) {
-        if (d < a.R) eat(a, b)
-      } else if (b.canEat(a)) {
-        if (d < b.R) eat(b, a)
-      } else {
+      // Swallowing starts once the prey's centre reaches the membrane (or a pseudopod); the engulf
+      // pulls it the rest of the way. A freshly cracked thick membrane just bounces.
+      if (a.canEat(b) && b.shielded <= 0) {
+        if (d < a.grabRadius) eat(a, b)
+      } else if (b.canEat(a) && a.shielded <= 0) {
+        if (d < b.grabRadius) eat(b, a)
+      } else if (d < a.R + b.R) {
         a.pushOutOf(b)
         b.pushOutOf(a)
       }
@@ -194,6 +195,10 @@ function interact() {
 }
 
 function eat(eater: Protocell, prey: Protocell) {
+  if (prey.armor >= 1) {
+    repel(eater, prey)
+    return
+  }
   if (prey === player) {
     rupture(prey, eater)
     return
@@ -203,6 +208,60 @@ function eat(eater: Protocell, prey: Protocell) {
   if (eater === player) {
     cellsEaten++
     updateHud()
+  }
+}
+
+/** A thick membrane holds: the attacker is thrown back and the membrane cracks. */
+function repel(eater: Protocell, prey: Protocell) {
+  prey.armor = 0
+  prey.shielded = 1.2
+  const dx = wrapDelta(prey.cx - eater.cx, WORLD)
+  const dy = wrapDelta(prey.cy - eater.cy, WORLD)
+  const d = Math.hypot(dx, dy) || 1
+  const nx = dx / d
+  const ny = dy / d
+  for (const p of prey.pts) {
+    p.vx += nx * 160
+    p.vy += ny * 160
+  }
+  for (const p of eater.pts) {
+    p.vx -= nx * 60
+    p.vy -= ny * 60
+  }
+  if (eater.brain) {
+    eater.brain.lunge = 0
+    eater.brain.prey = null
+    eater.brain.rest = 2.5
+  }
+  const hitX = prey.cx - nx * prey.R
+  const hitY = prey.cy - ny * prey.R
+  effects.ripple(hitX, hitY, prey.palette.rim, 0.9)
+  for (let i = 0; i < 6; i++) {
+    const a = Math.atan2(-ny, -nx) + rand(-0.9, 0.9)
+    effects.shard(hitX, hitY, Math.cos(a) * rand(30, 70), Math.sin(a) * rand(30, 70), a, prey.R * 0.3, prey.palette.rim)
+  }
+}
+
+/** Engulfing: point the pseudopod at the nearest cell the player could swallow. */
+function aimPseudopod(cell: Protocell) {
+  if (!cell.traits.has('engulfing')) return
+  let best: Protocell | null = null
+  let bestGap = cell.R * 2
+  for (const other of cells) {
+    if (other === cell || other.gone || other.engulfedBy || !cell.canEat(other)) continue
+    const gap = Math.hypot(wrapDelta(other.cx - cell.cx, WORLD), wrapDelta(other.cy - cell.cy, WORLD)) - cell.R
+    if (gap < bestGap) {
+      best = other
+      bestGap = gap
+    }
+  }
+  cell.reachWant = best ? 1 : 0
+  if (best) {
+    const dx = wrapDelta(best.cx - cell.cx, WORLD)
+    const dy = wrapDelta(best.cy - cell.cy, WORLD)
+    const d = Math.hypot(dx, dy) || 1
+    cell.reachDirX = dx / d
+    cell.reachDirY = dy / d
   }
 }
 
@@ -341,7 +400,18 @@ function choose(id: TraitId) {
   updateHud()
 }
 
+const svg = (body: string) =>
+  `<svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">${body}</svg>`
+
 const TRAIT_ICONS: Record<TraitId, string> = {
+  membrane: svg('<circle cx="32" cy="32" r="18"/><circle cx="32" cy="32" r="13" stroke-width="1.5"/>'),
+  engulfing: svg(
+    '<path d="M22 20c8-6 18-4 20 4 2 5 9 4 12 8s-3 9-10 8c-4 9-17 10-23 3s-8-17 1-23z"/><circle cx="54" cy="31" r="3"/>',
+  ),
+  photosynthesis: svg(
+    '<circle cx="32" cy="34" r="14"/><circle cx="28" cy="31" r="2.5"/><circle cx="36" cy="36" r="2.5"/><circle cx="31" cy="40" r="2"/>' +
+      '<path d="M32 8v6M14 16l4 4M50 16l-4 4M8 34h6M50 34h6"/>',
+  ),
   flagellum:
     '<svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">' +
     '<circle cx="40" cy="32" r="13"/><path d="M27 32c-4-6-7-6-10 0s-6 6-9 0-5-5-6-2"/></svg>',

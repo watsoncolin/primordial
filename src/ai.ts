@@ -83,7 +83,7 @@ export function think(cell: Protocell, dt: number, cells: Protocell[], nutrients
   if (brain.retarget <= 0) {
     brain.retarget = RETARGET
     const sense = cell.species === 'engulfer' ? tuning.engulferSense : GRAZER_SENSE * 0.5
-    brain.prey = brain.rest > 0 ? null : nearestCell(cell, cells, sense + cell.R, other => cell.canEat(other))
+    brain.prey = brain.rest > 0 ? null : nearestCell(cell, cells, sense + cell.R, other => cell.canEat(other), true)
     brain.food = nearestFood(cell, nutrients, GRAZER_SENSE)
   }
 
@@ -134,15 +134,23 @@ function steerAt(cell: Protocell, x: number, y: number, sign: number, out: Steer
   cell.brain!.heading = Math.atan2(out.y, out.x)
 }
 
-function nearestCell(cell: Protocell, cells: Protocell[], range: number, accept: (other: Protocell) => boolean) {
+/** Nearest acceptable cell within `range`; `noticeable` scales the range per target (e.g. glowing cells). */
+function nearestCell(
+  cell: Protocell,
+  cells: Protocell[],
+  range: number,
+  accept: (other: Protocell) => boolean,
+  noticeable = false,
+) {
   let best: Protocell | null = null
-  let bestD = range * range
+  let bestD = Infinity
   for (const other of cells) {
     if (other === cell || other.engulfedBy || other.gone) continue
     const dx = wrapDelta(other.cx - cell.cx, WORLD)
     const dy = wrapDelta(other.cy - cell.cy, WORLD)
     const d2 = dx * dx + dy * dy
-    if (d2 < bestD && accept(other)) {
+    const r = noticeable ? range * other.conspicuous : range
+    if (d2 < r * r && d2 < bestD && accept(other)) {
       best = other
       bestD = d2
     }

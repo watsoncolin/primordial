@@ -6,7 +6,21 @@ import { TAU, clamp, rand, wrapDelta } from './math'
 import type { Kind } from './nutrients'
 import { radiusFor, scale } from './scale'
 import { glowSprite } from './sprites'
-import type { TraitId } from './traits'
+import {
+  DIGEST_THRUST,
+  DIGEST_TIME,
+  ENGULF_RATIO,
+  MEMBRANE_DRAG,
+  MEMBRANE_RESEAL,
+  MEMBRANE_STIFFNESS,
+  MEMBRANE_THRUST,
+  MEMBRANE_YIELD,
+  PHOTO_CONSPICUOUS,
+  PHOTO_RATE,
+  PHOTO_STILL_BONUS,
+  PSEUDOPOD_REACH,
+  type TraitId,
+} from './traits'
 import type { Vent } from './vents'
 import type { View } from './view'
 
@@ -27,6 +41,7 @@ interface Blob extends Body {
 }
 
 const POINTS = 28
+const CHLOROPLAST_RGB = '120,230,110'
 /** The membrane point at the back of the rest shape (rest angle π), where a tail attaches. */
 const REAR = POINTS / 2
 /** Seconds an engulfed cell takes to be drawn in and dissolved. */
@@ -104,6 +119,18 @@ export class Protocell {
   boost = 1
   readonly traits = new Set<TraitId>()
   flagellum: Flagellum | null = null
+  /** Thick membrane: 1 = intact and able to repel an engulf; regrows from 0 after it cracks. */
+  armor = 0
+  /** Seconds during which engulf attempts just bounce off (right after the membrane cracks). */
+  shielded = 0
+  /** Engulfing: where the pseudopod should reach (unit vector) and whether there's something to reach for. */
+  reachDirX = 0
+  reachDirY = 0
+  reachWant = 0
+  /** 0..1 how far the pseudopod is currently extended. */
+  reach = 0
+  /** Seconds of sluggish digestion left after swallowing a cell. */
+  digest = 0
   /** Direction of the last applied thrust, and where it pushes on the water. */
   steerX = 0
   steerY = 0
@@ -124,6 +151,7 @@ export class Protocell {
   private readonly sx = new Float32Array(POINTS)
   private readonly sy = new Float32Array(POINTS)
   private readonly aura: HTMLCanvasElement | null
+  private static photoGlow: HTMLCanvasElement | undefined
   private flash = 0
   private engulfStartR = 0
 
@@ -169,12 +197,38 @@ export class Protocell {
   addTrait(id: TraitId) {
     this.traits.add(id)
     if (id === 'flagellum') this.flagellum = new Flagellum()
+    if (id === 'membrane') this.armor = 1
+    if (id === 'photosynthesis') {
+      for (let i = 0; i < 4; i++) {
+        this.inner.push({
+          x: this.cx + rand(-0.3, 0.3) * this.R,
+          y: this.cy + rand(-0.3, 0.3) * this.R,
+          vx: this.cvx,
+          vy: this.cvy,
+          r: rand(0.07, 0.1),
+          rgb: CHLOROPLAST_RGB,
+          life: Infinity,
+          maxLife: Infinity,
+          seed: rand(0, 100),
+        })
+      }
+    }
     this.flash = 1
+  }
+
+  /** How close prey's centre must come to be swallowed; pseudopods extend it toward the target. */
+  get grabRadius() {
+    return this.R * (1 + PSEUDOPOD_REACH * this.reach)
+  }
+
+  /** Multiplier on how far away predators notice this cell. */
+  get conspicuous() {
+    return this.traits.has('photosynthesis') ? PHOTO_CONSPICUOUS : 1
   }
 
   /** Can this cell swallow `other` whole? */
   canEat(other: Protocell) {
-    return other.biomass <= this.biomass * EAT_RATIO
+    return other.biomass <= this.biomass * (this.traits.has('engulfing') ? ENGULF_RATIO : EAT_RATIO)
   }
 
   startEngulf(by: Protocell) {
@@ -203,6 +257,16 @@ export class Protocell {
     } else {
       this.R += (this.targetR - this.R) * Math.min(1, dt * 1.5)
     }
+    const thick = this.traits.has('membrane')
+    if (thick && this.armor < 1) this.armor = Math.min(1, this.armor + dt / MEMBRANE_RESEAL)
+    this.shielded = Math.max(0, this.shielded - dt)
+    this.digest = Math.max(0, this.digest - dt)
+    this.reach += (this.reachWant - this.reach) * Math.min(1, dt * 5)
+    if (this.traits.has('photosynthesis') && !eater) {
+      // Light becomes biomass; it works best when the cell is still.
+      const still = mag < 0.1 ? PHOTO_STILL_BONUS : 1
+      this.grow(scale.biomass * PHOTO_RATE * still * dt)
+    }
     const { cx, cy, cvx, cvy, R, pts, restX, restY, nx, ny, weight } = this
 
     // Best-fit rotation of the rest circle onto the current points (2D shape matching),
@@ -224,7 +288,17 @@ export class Protocell {
     // Heavier cells accelerate less; lighter ones don't get a bonus, or small prey would outrun everything.
     // Relative to the current scale, so handling is the same at 1x and 1000x.
     const massFactor = Math.min(1, Math.pow(this.biomass / scale.biomass, MASS_EXPONENT - 1))
-    const base = tuning.thrust * THRUST_SCALE[this.species] * this.boost * massFactor * mag
+    const base =
+      tuning.thrust *
+      THRUST_SCALE[this.species] *
+      this.boost *
+      massFactor *
+      mag *
+      (thick ? MEMBRANE_THRUST : 1) *
+      (this.digest > 0 ? DIGEST_THRUST : 1)
+    const stiffness = tuning.stiffness * (thick ? MEMBRANE_STIFFNESS : 1)
+    const damping = tuning.wobbleDamping * (thick ? 1.3 : 1)
+    const dragScale = thick ? MEMBRANE_DRAG : 1
     let tx = ix * base * pulse
     let ty = iy * base * pulse
 
@@ -262,9 +336,14 @@ export class Protocell {
 
     for (let i = 0; i < POINTS; i++) {
       const p = pts[i]
-      const breathe = 1 + 0.03 * Math.sin(time * 1.7 + i * 0.9) + 0.015 * Math.sin(time * 3.1 - i * 2.3)
-      let ax = tuning.stiffness * (cx + nx[i] * R * breathe - p.x) - tuning.wobbleDamping * (p.vx - cvx)
-      let ay = tuning.stiffness * (cy + ny[i] * R * breathe - p.y) - tuning.wobbleDamping * (p.vy - cvy)
+      let shape = 1 + 0.03 * Math.sin(time * 1.7 + i * 0.9) + 0.015 * Math.sin(time * 3.1 - i * 2.3)
+      if (this.reach > 0.01) {
+        // Pseudopod: the membrane facing the target bulges out toward it.
+        const facing = Math.max(0, nx[i] * this.reachDirX + ny[i] * this.reachDirY)
+        shape += PSEUDOPOD_REACH * this.reach * facing ** 4
+      }
+      let ax = stiffness * (cx + nx[i] * R * shape - p.x) - damping * (p.vx - cvx)
+      let ay = stiffness * (cy + ny[i] * R * shape - p.y) - damping * (p.vy - cvy)
 
       // Drag against the surrounding water, sampled just outside the body so the cell's own wake
       // doesn't count. The side facing the oncoming flow takes most of it, which flattens the front.
@@ -273,7 +352,7 @@ export class Protocell {
       const rvy = p.vy - fluid.sv
       const rl = Math.hypot(rvx, rvy)
       const facing = rl > 1e-3 ? Math.max(0, (nx[i] * rvx + ny[i] * rvy) / rl) : 0
-      const k = tuning.drag * (0.4 + tuning.frontDrag * facing)
+      const k = tuning.drag * dragScale * (0.4 + tuning.frontDrag * facing)
       ax -= rvx * k
       ay -= rvy * k
 
@@ -352,6 +431,7 @@ export class Protocell {
   /** Finish swallowing another cell: its body becomes chunks being digested. */
   ingestCell(prey: Protocell) {
     this.grow(prey.biomass * 0.8)
+    if (this.traits.has('engulfing')) this.digest = DIGEST_TIME * Math.min(1, prey.biomass / this.biomass)
     const chunks = 3 + Math.round((prey.biomass / this.biomass) * 6)
     for (let i = 0; i < chunks; i++) {
       const life = rand(1.5, 3)
@@ -401,9 +481,14 @@ export class Protocell {
       const d = Math.sqrt(d2) || 0.001
       const nx = dx / d
       const ny = dy / d
-      // Split the overlap; the other cell does the same from its side.
-      p.x += nx * (r - d) * 0.5
-      p.y += ny * (r - d) * 0.5
+      // Split the overlap (the other cell does the same from its side); a thick membrane barely gives.
+      const share = this.traits.has('membrane')
+        ? MEMBRANE_YIELD
+        : other.traits.has('membrane')
+          ? 1 - MEMBRANE_YIELD
+          : 0.5
+      p.x += nx * (r - d) * share
+      p.y += ny * (r - d) * share
       const vn = (p.vx - other.cvx) * nx + (p.vy - other.cvy) * ny
       if (vn < 0) {
         p.vx -= vn * nx
@@ -446,6 +531,16 @@ export class Protocell {
       ctx.globalCompositeOperation = 'source-over'
     }
 
+    if (this.traits.has('photosynthesis')) {
+      // The giveaway glow that makes photosynthesisers easy to spot.
+      Protocell.photoGlow ??= glowSprite(120, 240, 110)
+      ctx.globalCompositeOperation = 'lighter'
+      ctx.globalAlpha = (0.2 + 0.06 * Math.sin(this.cx * 0.01 + this.engulfT + this.R)) * alpha
+      ctx.drawImage(Protocell.photoGlow, cx - R * 3, cy - R * 3, R * 6, R * 6)
+      ctx.globalAlpha = alpha
+      ctx.globalCompositeOperation = 'source-over'
+    }
+
     const body = ctx.createRadialGradient(cx - R * 0.35, cy - R * 0.4, R * 0.05, cx, cy, R * 1.05)
     body.addColorStop(0, `rgba(${pal.highlight},0.20)`)
     body.addColorStop(0.6, `rgba(${pal.body},0.10)`)
@@ -462,13 +557,29 @@ export class Protocell {
     }
     ctx.restore()
 
+    const thick = this.traits.has('membrane')
+    const cracked = thick && this.armor < 1
     ctx.lineJoin = 'round'
-    ctx.lineWidth = R * 0.2
+    ctx.lineWidth = R * (thick ? 0.32 : 0.2)
     ctx.strokeStyle = `rgba(${pal.glow},${0.08 + this.flash * 0.08})`
     ctx.stroke(path)
-    ctx.lineWidth = Math.max(1.5, R * 0.055)
-    ctx.strokeStyle = `rgba(${pal.rim},${0.6 + this.flash * 0.3})`
+    // A cracked thick membrane shows as a broken rim until it reseals.
+    if (cracked) ctx.setLineDash([R * (0.25 + 0.5 * this.armor), R * 0.18 * (1 - this.armor) + 1])
+    ctx.lineWidth = Math.max(1.5, R * (thick ? 0.11 : 0.055))
+    ctx.strokeStyle = `rgba(${pal.rim},${(cracked ? 0.45 : 0.6) + this.flash * 0.3})`
     ctx.stroke(path)
+    ctx.setLineDash([])
+    if (thick) {
+      // Inner layer of the membrane.
+      ctx.save()
+      ctx.translate(cx, cy)
+      ctx.scale(0.84, 0.84)
+      ctx.translate(-cx, -cy)
+      ctx.lineWidth = Math.max(1, R * 0.04) / 0.84
+      ctx.strokeStyle = `rgba(${pal.rim},${0.3 * this.armor + 0.1})`
+      ctx.stroke(path)
+      ctx.restore()
+    }
 
     // Specular highlight.
     ctx.beginPath()

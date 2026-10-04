@@ -12,7 +12,8 @@
     "soak": "tsx scripts/soak.mts",
     "handling": "tsx scripts/handling.mts",
     "tail": "tsx scripts/tail.mts",
-    "scale": "tsx scripts/scale.mts"
+    "scale": "tsx scripts/scale.mts",
+    "traits": "tsx scripts/traits.mts"
   },
   "devDependencies": {
     "prettier": "^3.9.9",
