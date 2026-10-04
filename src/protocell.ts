@@ -4,6 +4,21 @@ import { Flagellum } from './flagellum'
 import type { Fluid } from './fluid'
 import { TAU, clamp, rand, wrapDelta } from './math'
 import type { Kind } from './nutrients'
+import {
+  GIANT_FLAGELLUM_BIAS,
+  GIANT_FLAGELLUM_LENGTH,
+  GIANT_FLAGELLUM_POWER,
+  GIGANTISM_GROWTH,
+  GIGANTISM_THRUST,
+  HYPER_BURN,
+  HYPER_THRUST,
+  MINI_LOSS,
+  MINI_THRUST,
+  MITOSIS_INTERVAL,
+  MITOSIS_WARNING,
+  type MutationId,
+  STICKY_DRAG,
+} from './mutations'
 import { radiusFor, scale } from './scale'
 import { glowSprite } from './sprites'
 import {
@@ -49,7 +64,7 @@ const REAR = POINTS / 2
 /** Seconds an engulfed cell takes to be drawn in and dissolved. */
 const ENGULF_TIME = 0.5
 
-export type Species = 'player' | 'grazer' | 'engulfer'
+export type Species = 'player' | 'grazer' | 'engulfer' | 'offspring'
 
 /** Colours as "r,g,b" strings so alpha can be set per use. */
 interface Palette {
@@ -78,6 +93,15 @@ const PALETTES: Record<Species, Palette> = {
     aura: null,
     inner: ['210,230,255', '180,255,220'],
   },
+  // A daughter budded off by Unstable Mitosis: the player's colours, a little faded.
+  offspring: {
+    rim: '150,225,210',
+    glow: '110,200,190',
+    highlight: '190,240,230',
+    body: '80,170,165',
+    aura: null,
+    inner: ['255,214,170', '200,240,255'],
+  },
   engulfer: {
     rim: '255,160,195',
     glow: '240,110,160',
@@ -89,7 +113,7 @@ const PALETTES: Record<Species, Palette> = {
 }
 
 /** Thrust multiplier per species; engulfers are big and lazy. */
-const THRUST_SCALE: Record<Species, number> = { player: 1, grazer: 0.85, engulfer: 0.8 }
+const THRUST_SCALE: Record<Species, number> = { player: 1, grazer: 0.85, engulfer: 0.8, offspring: 0.85 }
 export const NUTRIENT_RGB: Record<Kind, string> = {
   organic: '170,255,160',
   lipid: '255,200,110',
@@ -142,6 +166,14 @@ export class Protocell {
   dashCooldown = 0
   /** Seconds before spikes can tear this cell again. */
   spikeImmune = 0
+  readonly mutations = new Set<MutationId>()
+  /** Unstable Mitosis: seconds until the next bud pops, and the bulge where it's forming. */
+  budTimer = Infinity
+  bud = 0
+  private budDirX = 1
+  private budDirY = 0
+  /** Venom: seconds of poisoning left (slowed, wasting away). */
+  poison = 0
   /** Seconds alive, for idle animation. */
   private age = 0
   /** Direction of the last applied thrust, and where it pushes on the water. */
@@ -203,12 +235,14 @@ export class Protocell {
   }
 
   grow(amount: number) {
-    this.biomass += amount
+    // Burning, leaking and poison can only waste a cell away so far.
+    this.biomass = Math.max(this.biomass + amount, scale.biomass * 0.02)
     this.targetR = radiusFor(this.biomass)
   }
 
   addTrait(id: TraitId) {
     this.traits.add(id)
+    if (id === 'sealed') this.mutations.delete('porous')
     if (id === 'flagellum') this.flagellum = new Flagellum()
     if (id === 'membrane') this.armor = 1
     if (id === 'photosynthesis') {
@@ -239,6 +273,29 @@ export class Protocell {
     if (this.flagellum) this.flagellum.beat = 1.8
     this.dashCooldown = BURST_COOLDOWN
     return true
+  }
+
+  addMutation(id: MutationId) {
+    this.mutations.add(id)
+    if (id === 'giantFlagellum' && this.flagellum) this.flagellum.size = GIANT_FLAGELLUM_LENGTH
+    if (id === 'gigantism') this.grow(this.biomass * GIGANTISM_GROWTH)
+    if (id === 'miniaturization') this.grow(-this.biomass * MINI_LOSS)
+    if (id === 'mitosis') this.resetBud()
+    this.flash = 1
+  }
+
+  /** Unstable Mitosis: start growing the next bud on a random side. */
+  resetBud() {
+    this.budTimer = rand(...MITOSIS_INTERVAL)
+    this.bud = 0
+    const a = rand(0, TAU)
+    this.budDirX = Math.cos(a)
+    this.budDirY = Math.sin(a)
+  }
+
+  /** Where the current bud sits (unit vector from the centre). */
+  get budDir(): [number, number] {
+    return [this.budDirX, this.budDirY]
   }
 
   /** How close prey's centre must come to be swallowed; pseudopods extend it toward the target. */
@@ -298,6 +355,16 @@ export class Protocell {
       if (this.dashCooldown === 0) this.flash = Math.max(this.flash, 0.5) // ready again
     }
     this.reach += (this.reachWant - this.reach) * Math.min(1, dt * 5)
+    const muts = this.mutations
+    if (muts.has('mitosis') && !eater) {
+      this.budTimer -= dt
+      this.bud = clamp(1 - this.budTimer / MITOSIS_WARNING, 0, 1)
+    }
+    if (!eater && muts.has('hypermetabolism')) this.grow(-scale.biomass * HYPER_BURN * dt)
+    if (this.poison > 0) {
+      this.poison = Math.max(0, this.poison - dt)
+      this.grow(-this.biomass * 0.03 * dt)
+    }
     if (this.traits.has('photosynthesis') && !eater) {
       // Light becomes biomass; it works best when the cell is still.
       const still = mag < 0.1 ? PHOTO_STILL_BONUS : 1
@@ -333,10 +400,14 @@ export class Protocell {
       massFactor *
       mag *
       (thick ? MEMBRANE_THRUST : 1) *
-      (this.digest > 0 ? DIGEST_THRUST : 1)
+      (this.digest > 0 ? DIGEST_THRUST : 1) *
+      (muts.has('hypermetabolism') ? HYPER_THRUST : 1) *
+      (muts.has('gigantism') ? GIGANTISM_THRUST : 1) *
+      (muts.has('miniaturization') ? MINI_THRUST : 1) *
+      (this.poison > 0 ? 0.5 : 1)
     const stiffness = tuning.stiffness * (thick ? MEMBRANE_STIFFNESS : 1)
     const damping = tuning.wobbleDamping * (thick ? 1.3 : 1)
-    const dragScale = thick ? MEMBRANE_DRAG : 1
+    const dragScale = (thick ? MEMBRANE_DRAG : 1) * (muts.has('sticky') ? STICKY_DRAG : 1)
     let tx = ix * base * pulse
     let ty = iy * base * pulse
 
@@ -351,8 +422,16 @@ export class Protocell {
       const err = Math.atan2(fx * iy - fy * ix, fx * ix + fy * iy)
       const align = Math.max(0, Math.cos(err))
       turn = tuning.flagellumTurn * clamp(err * 1.5, -1, 1) * mag
+      // A lopsided giant tail always drags you round one way.
+      if (muts.has('giantFlagellum')) turn += tuning.flagellumTurn * GIANT_FLAGELLUM_BIAS * mag
       tailEffort = mag * align
-      const push = base * tuning.flagellumPower * align * align * tail.growth
+      const push =
+        base *
+        tuning.flagellumPower *
+        (muts.has('giantFlagellum') ? GIANT_FLAGELLUM_POWER : 1) *
+        align *
+        align *
+        tail.growth
       // The cell's own squirm is weak next to the tail.
       tx = tx * 0.3 + fx * push
       ty = ty * 0.3 + fy * push
@@ -374,7 +453,14 @@ export class Protocell {
 
     for (let i = 0; i < POINTS; i++) {
       const p = pts[i]
-      let shape = 1 + 0.03 * Math.sin(time * 1.7 + i * 0.9) + 0.015 * Math.sin(time * 3.1 - i * 2.3)
+      // Hypermetabolism breathes fast and shallow.
+      const pace = muts.has('hypermetabolism') ? 2.6 : 1
+      let shape = 1 + 0.03 * Math.sin(time * 1.7 * pace + i * 0.9) + 0.015 * Math.sin(time * 3.1 * pace - i * 2.3)
+      if (this.bud > 0) {
+        // Unstable Mitosis: a daughter swelling out of one side.
+        const facing = Math.max(0, nx[i] * this.budDirX + ny[i] * this.budDirY)
+        shape += 0.45 * this.bud * facing ** 6
+      }
       if (this.reach > 0.01) {
         // Pseudopod: the membrane facing the target bulges out toward it.
         const facing = Math.max(0, nx[i] * this.reachDirX + ny[i] * this.reachDirY)
@@ -637,8 +723,30 @@ export class Protocell {
         ctx.lineTo(sx[i] + nx * R * 0.24, sy[i] + ny * R * 0.24)
         ctx.lineTo(sx[i] + ny * w, sy[i] - nx * w)
       }
-      ctx.fillStyle = `rgba(${pal.rim},0.85)`
-      ctx.fill()
+      if (this.mutations.has('hollowSpines')) {
+        ctx.lineWidth = Math.max(1, R * 0.03)
+        ctx.strokeStyle = `rgba(${pal.rim},0.9)`
+        ctx.stroke()
+      } else {
+        ctx.fillStyle = `rgba(${pal.rim},0.85)`
+        ctx.fill()
+      }
+    }
+
+    if (this.mutations.has('sticky')) {
+      // Grit stuck to the membrane.
+      ctx.fillStyle = 'rgba(190,200,170,0.55)'
+      for (let i = 1; i < POINTS; i += 3) {
+        ctx.beginPath()
+        ctx.arc(sx[i] + (sx[i] - cx) * 0.06, sy[i] + (sy[i] - cy) * 0.06, Math.max(0.8, R * 0.035), 0, TAU)
+        ctx.fill()
+      }
+    }
+    if (this.mutations.has('hypermetabolism') || this.poison > 0) {
+      // Running hot (orange), or poisoned (violet).
+      ctx.lineWidth = R * 0.12
+      ctx.strokeStyle = this.poison > 0 ? 'rgba(190,110,255,0.35)' : 'rgba(255,140,90,0.22)'
+      ctx.stroke(path)
     }
 
     // Specular highlight.

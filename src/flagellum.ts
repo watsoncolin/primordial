@@ -20,6 +20,8 @@ export class Flagellum {
   beat = 0
   /** 0..1 grown-in fraction. */
   growth = 0
+  /** Length and thickness multiplier (a Giant Flagellum mutation). */
+  size = 1
   private phase = 0
   private initialised = false
   // Screen-space scratch for drawing.
@@ -36,7 +38,7 @@ export class Flagellum {
     this.beat += (effort - this.beat) * Math.min(1, dt * 4)
     this.phase += dt * TAU * (1.2 + 4.8 * this.beat)
 
-    const seg = (R * LENGTH * this.growth) / SEGMENTS
+    const seg = (R * LENGTH * this.size * this.growth) / SEGMENTS
     const { x, y } = this
     if (!this.initialised) {
       for (let i = 0; i <= SEGMENTS; i++) {
@@ -108,7 +110,7 @@ export class Flagellum {
     rgb: string,
   ) {
     const { px, py, x, y } = this
-    const seg = (R * LENGTH * this.growth) / SEGMENTS
+    const seg = (R * LENGTH * this.size * this.growth) / SEGMENTS
     const amp = seg * (0.9 + 1.1 * this.beat)
     for (let i = 0; i <= SEGMENTS; i++) {
       // Perpendicular to the local spine direction.
@@ -143,7 +145,7 @@ export class Flagellum {
       let nx = -(py[b] - py[a])
       let ny = px[b] - px[a]
       const nl = Math.hypot(nx, ny) || 1
-      const half = Math.max(0.5, R * zoom * (0.075 - 0.065 * (i / SEGMENTS)))
+      const half = Math.max(0.5, R * zoom * this.size * (0.075 - 0.065 * (i / SEGMENTS)))
       nx = (nx / nl) * half
       ny = (ny / nl) * half
       lx[i] = px[i] + nx

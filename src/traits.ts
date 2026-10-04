@@ -1,9 +1,22 @@
+import type { MutationId } from './mutations'
+
 /**
  * Evolutionary traits. Each one physically changes the organism (propulsion, collisions, senses…)
  * rather than tweaking a stat; the behaviour lives with the body part it creates.
  */
 export type TraitId =
-  'flagellum' | 'membrane' | 'engulfing' | 'photosynthesis' | 'chemoreception' | 'burst' | 'spikes' | 'tendril' | 'lure'
+  | 'flagellum'
+  | 'membrane'
+  | 'engulfing'
+  | 'photosynthesis'
+  | 'chemoreception'
+  | 'burst'
+  | 'spikes'
+  | 'tendril'
+  | 'lure'
+  | 'sealed'
+  | 'toxic'
+  | 'venom'
 
 export interface TraitInfo {
   id: TraitId
@@ -14,6 +27,10 @@ export interface TraitInfo {
   detail: string
   /** The adaptation this one evolves from. */
   requires?: TraitId
+  /** Only offered after this mutation. */
+  requiresMutation?: MutationId
+  /** Taking this trait cures the mutation. */
+  cures?: MutationId
 }
 
 export const TRAITS: Record<TraitId, TraitInfo> = {
@@ -78,12 +95,45 @@ export const TRAITS: Record<TraitId, TraitInfo> = {
     detail: 'Small cells are drawn to your light instead of fleeing from it.',
     requires: 'photosynthesis',
   },
+  sealed: {
+    id: 'sealed',
+    name: 'Sealed Membrane',
+    tagline: 'Patch the leaks.',
+    detail: 'Cures your Porous Membrane. No more biomass trickling away.',
+    requiresMutation: 'porous',
+    cures: 'porous',
+  },
+  toxic: {
+    id: 'toxic',
+    name: 'Toxic Seep',
+    tagline: 'If you must leak, leak poison.',
+    detail: 'You keep leaking, but anything that eats what you leave behind wastes away instead of growing.',
+    requiresMutation: 'porous',
+  },
+  venom: {
+    id: 'venom',
+    name: 'Venom Gland',
+    tagline: 'Your hollow spines can inject.',
+    detail: 'Spike hits poison their victim: slowed to half speed and wasting away for a few seconds.',
+    requires: 'spikes',
+    requiresMutation: 'hollowSpines',
+  },
 }
 
-/** Traits a cell with `has` could evolve next: not taken yet, prerequisites met. */
-export function availableTraits(has: Set<TraitId>) {
-  return Object.values(TRAITS).filter(t => !has.has(t.id) && (!t.requires || has.has(t.requires)))
+/** Traits a cell could evolve next: not taken yet, prerequisite trait and mutation present. */
+export function availableTraits(has: Set<TraitId>, mutations: Set<MutationId>) {
+  return Object.values(TRAITS).filter(
+    t =>
+      !has.has(t.id) &&
+      (!t.requires || has.has(t.requires)) &&
+      (!t.requiresMutation || mutations.has(t.requiresMutation)) &&
+      // Once the leak is sealed, there's nothing left to weaponise (and vice versa).
+      !(t.requiresMutation === 'porous' && (has.has('sealed') || has.has('toxic'))),
+  )
 }
+
+/** Venom: seconds a spike hit keeps its victim poisoned. */
+export const VENOM_TIME = 4
 
 // Trait tuning. Kept here so each trait's numbers sit next to its description.
 /** Thick membrane: how much of a contact overlap this cell yields (0.5 = even split). */

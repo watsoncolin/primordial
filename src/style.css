@@ -415,3 +415,71 @@ kbd {
   border-color: rgba(175, 255, 235, 0.8);
   background: rgba(16, 64, 66, 0.85);
 }
+
+#mutations {
+  margin-top: 2px;
+  max-width: 240px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: rgba(210, 170, 255, 0.85);
+}
+
+#mutation {
+  position: fixed;
+  top: calc(40px + env(safe-area-inset-top));
+  left: 50%;
+  transform: translate(-50%, -8px);
+  min-width: 240px;
+  padding: 12px 18px 10px;
+  border: 1px solid rgba(200, 150, 255, 0.45);
+  border-radius: 12px;
+  background: rgba(30, 14, 46, 0.78);
+  color: rgba(240, 230, 255, 0.95);
+  text-align: center;
+  pointer-events: none;
+  opacity: 0;
+  transition:
+    opacity 0.5s,
+    transform 0.5s;
+}
+
+#mutation.shown {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+#mutation h2 {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: rgba(210, 170, 255, 0.9);
+}
+
+#mutation p {
+  margin: 2px 0 0;
+  font-size: 12px;
+}
+
+#mutation .name {
+  margin-top: 4px;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+#mutation .good::before {
+  content: '+ ';
+  color: rgba(170, 255, 190, 0.9);
+}
+
+#mutation .bad::before {
+  content: '− ';
+  color: rgba(255, 150, 150, 0.9);
+}
+
+#lineage .mutations {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: rgba(210, 170, 255, 0.8);
+}

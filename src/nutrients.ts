@@ -27,6 +27,8 @@ export interface Nutrient {
   /** Culled by a rescale: fades out over about a second, can't be eaten, then is removed. */
   fading: boolean
   alpha: number
+  /** Leaked by a Toxic Seep: wastes away whatever eats it. */
+  toxic: boolean
 }
 
 /**
@@ -51,6 +53,7 @@ export class Nutrients {
   readonly count: Record<Kind, number> = { organic: 0, lipid: 0, mineral: 0 }
   private spawnTimer = 0
   private readonly organicGlow = glowSprite(170, 255, 160)
+  private readonly toxicGlow = glowSprite(200, 120, 255)
 
   seed(px: number, py: number, vents: Vent[]) {
     // One cloud just ahead of the player so there's something to chase immediately.
@@ -86,7 +89,9 @@ export class Nutrients {
       value,
       fading: false,
       alpha: 1,
+      toxic: false,
     })
+    return this.items[this.items.length - 1]
   }
 
   /** A drifting cloud of organics with the occasional lipid mixed in. */
@@ -226,7 +231,7 @@ export class Nutrients {
       const s = n.r * z * 6
       if (!view.onScreen(sx, sy, s)) continue
       ctx.globalAlpha = (0.55 + 0.35 * Math.sin(time * 3 + n.phase)) * n.alpha
-      ctx.drawImage(this.organicGlow, sx - s / 2, sy - s / 2, s, s)
+      ctx.drawImage(n.toxic ? this.toxicGlow : this.organicGlow, sx - s / 2, sy - s / 2, s, s)
     }
     ctx.globalAlpha = 1
     ctx.globalCompositeOperation = 'source-over'

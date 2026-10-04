@@ -19,6 +19,7 @@
       <div class="stat" data-kind="mineral"><i></i>minerals <b>0</b></div>
       <div class="stat" id="biomass">biomass <b>×1.00</b></div>
       <div class="stat" id="goal">transition <b></b></div>
+      <div id="mutations"></div>
       <div id="fps"></div>
     </div>
     <div id="evolve">
@@ -28,6 +29,12 @@
     </div>
     <button id="transition-btn" type="button">Begin the Great Transition <kbd>T</kbd></button>
     <div id="banner"></div>
+    <div id="mutation">
+      <h2>Mutation</h2>
+      <p class="name"></p>
+      <p class="good"></p>
+      <p class="bad"></p>
+    </div>
     <div id="prompt">
       <h1>The Great Transition</h1>
       <p class="body">
@@ -45,6 +52,7 @@
       <h1 class="name"></h1>
       <p class="form"></p>
       <p class="stats"></p>
+      <p class="mutations"></p>
       <p class="discovered"></p>
       <button type="button" class="primary" data-action="again">Begin a new protocell <kbd>Enter</kbd></button>
     </div>

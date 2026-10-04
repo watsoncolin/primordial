@@ -24,6 +24,9 @@ const BRANCH: Record<TraitId, Branch> = {
   photosynthesis: 'light',
   lure: 'light',
   chemoreception: 'senses',
+  sealed: 'defense',
+  toxic: 'predation',
+  venom: 'predation',
 }
 
 /** Latin-ish genus (from your first adaptation) and epithet (from your latest). */
@@ -37,6 +40,9 @@ const GENUS: Record<TraitId, string> = {
   photosynthesis: 'Lucella',
   lure: 'Lampadia',
   chemoreception: 'Olfactoria',
+  sealed: 'Sutura',
+  toxic: 'Toxella',
+  venom: 'Venenia',
 }
 
 const EPITHET: Record<TraitId, string> = {
@@ -49,6 +55,9 @@ const EPITHET: Record<TraitId, string> = {
   photosynthesis: 'viridis',
   lure: 'illicens',
   chemoreception: 'sagax',
+  sealed: 'obsignatus',
+  toxic: 'toxicus',
+  venom: 'venenosus',
 }
 
 const FORM: Record<Branch | 'none', string> = {

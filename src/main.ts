@@ -18,12 +18,29 @@ import {
   TENDRIL_PULL,
   TENDRIL_RANGE,
   TRAITS,
+  VENOM_TIME,
   type TraitId,
   type TraitInfo,
   availableTraits,
 } from './traits'
 import { needsRescale, rescaleWorld } from './rescale'
 import { scale } from './scale'
+import {
+  MITOSIS_SHARE,
+  MUTAGEN_CELL,
+  MUTAGEN_FIRST,
+  MUTAGEN_HURT,
+  MUTAGEN_MINERAL,
+  MUTAGEN_STEP,
+  MUTATIONS,
+  type MutationId,
+  type MutationInfo,
+  HOLLOW_SPIKE_BITE,
+  POROUS_INTERVAL,
+  POROUS_LEAK,
+  STICKY_REACH,
+  rollMutation,
+} from './mutations'
 import { Senses } from './senses'
 import {
   ASSEMBLY_TIME,
@@ -63,6 +80,12 @@ let effects: Effects
 let senses: Senses
 let eaten: Record<Kind, number>
 let cellsEaten = 0
+/** Hidden mutagen meter: fills from minerals, meals and injuries; a mutation hits when it's full. */
+let mutagen = 0
+let mutagenNeeded = MUTAGEN_FIRST
+let leakTimer = 0
+/** Real seconds of slow motion left after a mutation hits. */
+let mutationSlow = 0
 let time = 0
 let startTime = 0
 let deathTime: number | null = null
@@ -138,6 +161,11 @@ function reset() {
   senses = new Senses()
   eaten = { organic: 0, lipid: 0, mineral: 0 }
   cellsEaten = 0
+  mutagen = 0
+  mutagenNeeded = MUTAGEN_FIRST
+  leakTimer = 0
+  mutationSlow = 0
+  hud.mutation.classList.remove('shown')
   startTime = time
   deathTime = null
   populationTimer = 0
@@ -268,6 +296,7 @@ function simulate(dt: number) {
   if (alive && player.traits.has('chemoreception')) senses.update(dt, focus.x, focus.y, nutrients, vents)
   if (living) checkEvolution()
   if (alive) advanceTransition(dt)
+  if (living) mutationEffects(dt)
   if (living && needsRescale(player)) {
     const k = rescaleWorld(player, cells, nutrients, vents, fluid, effects)
     // Everything just shrank by k around the player; zoom in by the same amount so the screen doesn't change.
@@ -338,6 +367,7 @@ function eat(eater: Protocell, prey: Protocell) {
   effects.ripple(prey.cx, prey.cy, eater.palette.rim, 0.8)
   if (prey.colony) effects.ripple(prey.cx, prey.cy, prey.palette.rim, 1.2)
   if (eater === player) {
+    addMutagen(MUTAGEN_CELL)
     cellsEaten++
     updateHud()
   }
@@ -347,7 +377,10 @@ function eat(eater: Protocell, prey: Protocell) {
 function tear(victim: Protocell, spiky: Protocell, speed: number) {
   if (speed < SPIKE_MIN_SPEED || victim.spikeImmune > 0 || victim.engulfedBy) return
   victim.spikeImmune = SPIKE_RECOVERY
-  const lost = victim.biomass * SPIKE_BITE * Math.min(1, speed / SPIKE_FULL_SPEED)
+  const bite = SPIKE_BITE * (spiky.mutations.has('hollowSpines') ? HOLLOW_SPIKE_BITE : 1)
+  const lost = victim.biomass * bite * Math.min(1, speed / SPIKE_FULL_SPEED)
+  if (spiky.traits.has('venom')) victim.poison = VENOM_TIME
+  if (victim === player) addMutagen(MUTAGEN_HURT)
   victim.grow(-lost)
   // Spray from the side that was hit.
   const dx = wrapDelta(spiky.cx - victim.cx, WORLD)
@@ -385,6 +418,7 @@ function tear(victim: Protocell, spiky: Protocell, speed: number) {
 
 /** A thick membrane holds: the attacker is thrown back and the membrane cracks. */
 function repel(eater: Protocell, prey: Protocell) {
+  if (prey === player) addMutagen(MUTAGEN_HURT)
   prey.armor = 0
   prey.shielded = 1.2
   const dx = wrapDelta(prey.cx - eater.cx, WORLD)
@@ -529,9 +563,10 @@ function feed(dt: number) {
   for (const cell of cells) {
     if (cell.engulfedBy || cell.gone) continue
     const R = cell.R
-    const reach = R + 8
+    const sticky = cell.mutations.has('sticky')
+    const reach = R + (sticky ? STICKY_REACH : 8)
     for (const n of nutrients.items) {
-      if (n.dead || n.grace > 0 || n.fading) continue
+      if (n.dead || n.grace > 0 || n.fading || (n.toxic && cell === player)) continue
       const dx = wrapDelta(n.x - cell.cx, WORLD)
       const dy = wrapDelta(n.y - cell.cy, WORLD)
       if (Math.abs(dx) > reach + n.r || Math.abs(dy) > reach + n.r) continue
@@ -539,18 +574,99 @@ function feed(dt: number) {
       if (d < R * 0.85) {
         n.dead = true
         cell.ingest(n.kind, cell.cx + dx, cell.cy + dy, n.vx, n.vy)
-        cell.grow(n.value * (cell === player ? 1 : NPC_GROWTH))
+        if (n.toxic) {
+          // Toxic Seep: the leak poisons whatever eats it.
+          cell.grow(-n.value * 3)
+          cell.poison = Math.max(cell.poison, 1.5)
+        } else {
+          cell.grow(n.value * (cell === player ? 1 : NPC_GROWTH))
+        }
+        if (cell === player && n.kind === 'mineral') addMutagen(MUTAGEN_MINERAL)
         if (cell === player) {
           effects.ripple(n.x, n.y, NUTRIENT_RGB[n.kind])
           eaten[n.kind]++
           updateHud()
         }
       } else if (d < reach + n.r) {
-        n.vx -= (dx / d) * tuning.capture * dt
-        n.vy -= (dy / d) * tuning.capture * dt
+        n.vx -= (dx / d) * tuning.capture * (sticky ? 1.5 : 1) * dt
+        n.vy -= (dy / d) * tuning.capture * (sticky ? 1.5 : 1) * dt
       }
     }
   }
+}
+
+// ── Mutations ────────────────────────────────────────────────────────────────
+
+function addMutagen(amount: number) {
+  if (phase !== 'living' || deathTime !== null) return
+  mutagen += amount
+  if (mutagen >= mutagenNeeded) mutate()
+}
+
+/** Something changes, whether you like it or not. */
+function mutate(forced?: MutationInfo) {
+  const m = forced ?? rollMutation(player.mutations, player.traits)
+  if (!m) return
+  mutagen = Math.max(0, mutagen - mutagenNeeded)
+  mutagenNeeded += MUTAGEN_STEP
+  player.addMutation(m.id)
+  mutationSlow = 0.8
+  effects.ripple(player.cx, player.cy, '200,140,255', 1.2)
+  hud.mutationName.textContent = m.name
+  hud.mutationGood.textContent = m.good
+  hud.mutationBad.textContent = m.bad
+  hud.mutation.classList.remove('shown')
+  void hud.mutation.offsetWidth // restart the fade if one is already showing
+  hud.mutation.classList.add('shown')
+  clearTimeout(mutationToast)
+  mutationToast = setTimeout(() => hud.mutation.classList.remove('shown'), 5000)
+  updateHud()
+}
+let mutationToast: ReturnType<typeof setTimeout> | undefined
+
+/** Ongoing mutation effects that need the world: leaking, and buds popping off. */
+function mutationEffects(dt: number) {
+  if (player.mutations.has('porous')) {
+    leakTimer -= dt
+    if (leakTimer <= 0) {
+      leakTimer = POROUS_INTERVAL
+      const amount = scale.biomass * POROUS_LEAK * POROUS_INTERVAL
+      player.grow(-amount)
+      // Seeps out of the trailing side.
+      const v = Math.hypot(player.cvx, player.cvy)
+      const bx = v > 5 ? -player.cvx / v : rand(-1, 1)
+      const by = v > 5 ? -player.cvy / v : rand(-1, 1)
+      const n = nutrients.spawn(
+        'organic',
+        player.cx + bx * player.R,
+        player.cy + by * player.R,
+        player.cvx * 0.3 + bx * 20,
+        player.cvy * 0.3 + by * 20,
+        1.5,
+        amount,
+      )
+      n.toxic = player.traits.has('toxic')
+    }
+  }
+  if (player.mutations.has('mitosis') && player.budTimer <= 0) popBud(player)
+}
+
+/** Unstable Mitosis: the bud pinches off as a daughter cell with a fifth of the parent. */
+function popBud(cell: Protocell) {
+  const share = cell.biomass * MITOSIS_SHARE
+  cell.grow(-share)
+  const [bx, by] = cell.budDir
+  const daughter = new Protocell(cell.cx + bx * cell.R * 1.15, cell.cy + by * cell.R * 1.15, share, 'offspring')
+  daughter.brain = newBrain()
+  for (const p of daughter.pts) {
+    p.vx = cell.cvx + bx * 70
+    p.vy = cell.cvy + by * 70
+  }
+  daughter.spikeImmune = 1
+  cells.push(daughter)
+  cell.resetBud()
+  effects.ripple(daughter.cx, daughter.cy, cell.palette.rim, 0.8)
+  updateHud()
 }
 
 // ── The Great Transition ─────────────────────────────────────────────────────
@@ -735,6 +851,11 @@ function holdFormation(dt: number) {
   }
 }
 
+function mutationList() {
+  const names = [...player.mutations].map(id => MUTATIONS[id].name)
+  return names.length ? `Mutations: ${names.join(', ')}` : ''
+}
+
 function completeTransition() {
   phase = 'complete'
   hud.banner.classList.remove('shown')
@@ -743,6 +864,7 @@ function completeTransition() {
   const seconds = Math.round(time - startTime)
   hud.lineageName.textContent = result.name
   hud.lineageForm.textContent = `It became ${result.form}.`
+  hud.lineageMutations.textContent = mutationList()
   hud.lineageStats.textContent =
     `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} · peak biomass ×${player.biomass.toFixed(1)} · ` +
     `${cellsEaten} cells absorbed · ${evolutions} evolutions · ${colony.length} of ${COLONY_CELLS} cells survived`
@@ -798,7 +920,7 @@ function nextEvolutionCost() {
 
 /** Traits the player could still evolve, in random order, at most three. */
 function evolutionOptions(): TraitInfo[] {
-  const open = availableTraits(player.traits)
+  const open = availableTraits(player.traits, player.mutations)
   for (let i = open.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1))
     ;[open[i], open[j]] = [open[j], open[i]]
@@ -859,6 +981,14 @@ const svg = (body: string) =>
   `<svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">${body}</svg>`
 
 const TRAIT_ICONS: Record<TraitId, string> = {
+  sealed: svg('<circle cx="32" cy="32" r="16"/><path d="M24 32l6 6 11-13"/>'),
+  toxic: svg(
+    '<circle cx="24" cy="30" r="12"/><circle cx="44" cy="40" r="3"/><circle cx="52" cy="46" r="2.2"/><circle cx="40" cy="50" r="2"/>' +
+      '<path d="M20 28l8 4M28 28l-8 4" stroke-width="2"/>',
+  ),
+  venom: svg(
+    '<circle cx="26" cy="32" r="11"/><path d="M37 32h18M50 27l5 5-5 5"/><circle cx="45" cy="32" r="2.5" fill="currentColor"/>',
+  ),
   chemoreception: svg(
     '<circle cx="26" cy="32" r="12"/><path d="M42 24c4 2 4 14 0 16M48 19c7 4 7 22 0 26M54 14c9 6 9 30 0 36" stroke-width="2"/>',
   ),
@@ -967,13 +1097,20 @@ const hud = {
   lineageStats: document.querySelector<HTMLElement>('#lineage .stats')!,
   lineageDiscovered: document.querySelector<HTMLElement>('#lineage .discovered')!,
   goal: document.querySelector<HTMLElement>('#goal b')!,
+  mutations: document.querySelector<HTMLElement>('#mutations')!,
+  mutation: document.querySelector<HTMLElement>('#mutation')!,
+  mutationName: document.querySelector<HTMLElement>('#mutation .name')!,
+  mutationGood: document.querySelector<HTMLElement>('#mutation .good')!,
+  mutationBad: document.querySelector<HTMLElement>('#mutation .bad')!,
+  lineageMutations: document.querySelector<HTMLElement>('#lineage .mutations')!,
   cards: document.querySelector<HTMLElement>('#evolve .cards')!,
 }
 
 function updateHud() {
+  hud.mutations.textContent = [...player.mutations].map(id => MUTATIONS[id].name).join(' · ')
   hud.organic.textContent = String(eaten.organic)
   hud.lipid.textContent = String(eaten.lipid)
-  const more = availableTraits(player.traits).length > 0
+  const more = availableTraits(player.traits, player.mutations).length > 0
   hud.mineral.textContent = more ? `${eaten.mineral} / ${nextEvolutionCost()}` : String(eaten.mineral)
   hud.biomass.textContent = `×${player.biomass.toFixed(2)}`
   hud.goal.textContent =
@@ -1041,7 +1178,9 @@ let fpsTime = 0
 function frame(now: number) {
   const elapsed = Math.min((now - last) / 1000, 0.1)
   last = now
-  acc += elapsed * (choosing || confirming ? CHOICE_TIME_SCALE : phase === 'complete' ? 0.5 : 1)
+  mutationSlow = Math.max(0, mutationSlow - elapsed)
+  acc +=
+    elapsed * (choosing || confirming ? CHOICE_TIME_SCALE : phase === 'complete' ? 0.5 : mutationSlow > 0 ? 0.3 : 1)
   let steps = 0
   while (acc >= STEP && steps < 3) {
     simulate(STEP)
@@ -1078,14 +1217,17 @@ if (import.meta.env.DEV) {
       },
       /** Spawn a cell `dist` units to the right of the player. */
       offerEvolution: checkEvolutionNow,
+      mutate(id?: MutationId) {
+        mutate(id ? MUTATIONS[id] : undefined)
+      },
       evolve(id: TraitId) {
         player.addTrait(id)
         updateHud()
       },
       /** Skip ahead to the Great Transition: evolve to the requirement and grow. */
       readyTransition() {
-        while (evolutions < TRANSITION_EVOLUTIONS && availableTraits(player.traits).length) {
-          player.addTrait(availableTraits(player.traits)[0].id)
+        while (evolutions < TRANSITION_EVOLUTIONS && availableTraits(player.traits, player.mutations).length) {
+          player.addTrait(availableTraits(player.traits, player.mutations)[0].id)
           evolutions++
         }
         player.grow(Math.max(0, TRANSITION_BIOMASS - player.biomass))
@@ -1101,6 +1243,9 @@ if (import.meta.env.DEV) {
       },
       get colony() {
         return colony
+      },
+      get nutrients() {
+        return nutrients
       },
       get phase() {
         return phase
