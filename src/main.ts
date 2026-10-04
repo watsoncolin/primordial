@@ -88,6 +88,98 @@ const sound = new Sound()
 /** Progress that outlives a run: DNA, generations, unlocks and the Tree of Life's records. */
 const save = loadSave()
 
+/** Sticky test mode: a clicked world target the player keeps swimming toward. */
+let stickyTarget: { x: number; y: number } | null = null
+const stickySteer: Steer = { x: 0, y: 0, mag: 0 }
+
+/** The player's steering from input, at world (x, y) with radius r; handles sticky test mode. */
+function playerSteer(x: number, y: number, r: number): Steer {
+  if (!input.sticky) return input.read(view.sx(x), view.sy(y), r * view.zoom)
+  if (input.stickyCleared) {
+    stickyTarget = null
+    input.stickyCleared = false
+  }
+  const click = input.takeClick()
+  if (click) {
+    stickyTarget = {
+      x: wrapCoord(view.x + (click.x - view.w / 2) / view.zoom, WORLD),
+      y: wrapCoord(view.y + (click.y - view.h / 2) / view.zoom, WORLD),
+    }
+  }
+  stickySteer.mag = 0
+  if (stickyTarget) {
+    const dx = wrapDelta(stickyTarget.x - x, WORLD)
+    const dy = wrapDelta(stickyTarget.y - y, WORLD)
+    const d = Math.hypot(dx, dy)
+    if (d < r * 0.8) {
+      stickyTarget = null // reached: stop thrusting, keep drifting
+    } else {
+      stickySteer.x = dx / d
+      stickySteer.y = dy / d
+      stickySteer.mag = 1
+    }
+  } else if (input.stickyDir) {
+    const len = Math.hypot(input.stickyDir.x, input.stickyDir.y) || 1
+    stickySteer.x = input.stickyDir.x / len
+    stickySteer.y = input.stickyDir.y / len
+    stickySteer.mag = 1
+  }
+  return stickySteer
+}
+
+/** Sticky test mode: an arrow showing the held direction, and a crosshair on a click target. */
+function drawStickyIndicator() {
+  if (!input.sticky || deathTime !== null) return
+  const px = view.sx(focus.x)
+  const py = view.sy(focus.y)
+  const ring = focus.r * view.zoom + 10
+  ctx.lineCap = 'round'
+  ctx.lineWidth = 2
+  ctx.strokeStyle = 'rgba(255,255,255,0.75)'
+  ctx.fillStyle = 'rgba(255,255,255,0.75)'
+  let dx = 0
+  let dy = 0
+  if (stickyTarget) {
+    const tx = view.sx(stickyTarget.x)
+    const ty = view.sy(stickyTarget.y)
+    ctx.beginPath()
+    ctx.arc(tx, ty, 7, 0, TAU)
+    ctx.moveTo(tx - 12, ty)
+    ctx.lineTo(tx + 12, ty)
+    ctx.moveTo(tx, ty - 12)
+    ctx.lineTo(tx, ty + 12)
+    ctx.stroke()
+    const d = Math.hypot(tx - px, ty - py) || 1
+    dx = (tx - px) / d
+    dy = (ty - py) / d
+  } else if (input.stickyDir) {
+    const len = Math.hypot(input.stickyDir.x, input.stickyDir.y) || 1
+    dx = input.stickyDir.x / len
+    dy = input.stickyDir.y / len
+  }
+  if (!dx && !dy) {
+    // Mode on, thrust released: a small hollow dot.
+    ctx.beginPath()
+    ctx.arc(px, py - ring, 3, 0, TAU)
+    ctx.stroke()
+    return
+  }
+  const sx = px + dx * ring
+  const sy = py + dy * ring
+  const ex = sx + dx * 22
+  const ey = sy + dy * 22
+  ctx.beginPath()
+  ctx.moveTo(sx, sy)
+  ctx.lineTo(ex, ey)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.moveTo(ex + dx * 6, ey + dy * 6)
+  ctx.lineTo(ex - dy * 5, ey + dx * 5)
+  ctx.lineTo(ex + dy * 5, ey - dx * 5)
+  ctx.closePath()
+  ctx.fill()
+}
+
 /** Stereo position for something at world x, from where it is on screen. */
 function panAt(x: number) {
   return clamp((view.sx(x) / view.w) * 2 - 1, -1, 1) * 0.7
@@ -205,6 +297,7 @@ function reset() {
   closeChoice()
   phase = 'living'
   confirming = false
+  stickyTarget = null
   colony = []
   slots.clear()
   lineage = null
@@ -294,9 +387,7 @@ function simulate(dt: number) {
   }
   updateFocus()
   const colonySteer =
-    phase === 'colony' && !confirming
-      ? input.read(view.sx(focus.x), view.sy(focus.y), focus.r * view.zoom * 2)
-      : { x: 0, y: 0, mag: 0 }
+    phase === 'colony' && !confirming ? playerSteer(focus.x, focus.y, focus.r * 2) : { x: 0, y: 0, mag: 0 }
   if (phase === 'assembling' || phase === 'complete') holdFormation(dt)
 
   for (const cell of cells) {
@@ -305,8 +396,7 @@ function simulate(dt: number) {
     let sy = 0
     let mag = 0
     if (cell === player) {
-      if (!choosing && !confirming)
-        ({ x: sx, y: sy, mag } = input.read(view.sx(cell.cx), view.sy(cell.cy), cell.R * view.zoom))
+      if (!choosing && !confirming) ({ x: sx, y: sy, mag } = playerSteer(cell.cx, cell.cy, cell.R))
     } else if (cell.colony) {
       if (phase === 'colony' && !cell.engulfedBy) ({ x: sx, y: sy, mag } = flock(cell, colonySteer))
     } else if (!cell.engulfedBy) {
@@ -1331,6 +1421,7 @@ function render() {
     time,
   )
   drawZoneLabels(ctx, view, zones, player.traits, focus.x, focus.y)
+  drawStickyIndicator()
   ctx.fillStyle = vignette
   ctx.fillRect(0, 0, view.w, view.h)
   if (deathTime === null && player.traits.has('chemoreception')) senses.draw(ctx, view, time)
@@ -1465,6 +1556,13 @@ const flagFolder = gui.addFolder('Flagellum')
 flagFolder.add(tuning, 'flagellumPower', 0, 5).name('power')
 flagFolder.add(tuning, 'flagellumTurn', 0, 800).name('turn')
 gui.add({ evolve: () => checkEvolutionNow() }, 'evolve').name('evolve now')
+gui
+  .add(input, 'sticky')
+  .name('sticky movement')
+  .onChange(() => {
+    input.stickyDir = null
+    stickyTarget = null
+  })
 gui.add({ volume: 0.7 }, 'volume', 0, 1).onChange((v: number) => sound.setVolume(v))
 gui.add(tuning, 'showFlow').name('show flow')
 gui.add({ reset }, 'reset')

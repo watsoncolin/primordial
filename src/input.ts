@@ -22,12 +22,27 @@ export class Input {
   private readonly keys = new Set<string>()
   private lastTap = 0
   private dashQueued = false
+  /**
+   * Sticky ("toggle") movement, for automated playtests: one input keeps you swimming until the
+   * next. Arrows/WASD set a direction, Space releases thrust, a click sets a target, Escape cancels,
+   * B is Burst Jet. Physics are unchanged; only how input is held.
+   */
+  sticky = new URLSearchParams(location.search).has('sticky')
+  /** Sticky direction currently held, if any. */
+  stickyDir: { x: number; y: number } | null = null
+  /** A click waiting to be turned into a world target (screen px). */
+  private pendingClick: { x: number; y: number } | null = null
 
   constructor(canvas: HTMLCanvasElement) {
     canvas.addEventListener('pointerdown', e => {
+      this.used = true
+      if (this.sticky) {
+        this.pendingClick = { x: e.clientX, y: e.clientY }
+        this.stickyDir = null
+        return
+      }
       canvas.setPointerCapture(e.pointerId)
       this.pointer = { x: e.clientX, y: e.clientY }
-      this.used = true
       // A quick second tap is the touch equivalent of Space.
       if (e.timeStamp - this.lastTap < DOUBLE_TAP_MS) this.dashQueued = true
       this.lastTap = e.timeStamp
@@ -40,6 +55,23 @@ export class Input {
     window.addEventListener('keydown', e => {
       if (e.target instanceof HTMLInputElement) return
       const key = e.key.toLowerCase()
+      if (this.sticky) {
+        if (key in KEYS) {
+          const [x, y] = KEYS[key]
+          this.stickyDir = { x, y }
+          this.pendingClick = null
+          this.stickyCleared = true
+          this.used = true
+          e.preventDefault()
+        } else if (key === ' ' || key === 'escape') {
+          this.stickyDir = null
+          this.stickyCleared = true
+          e.preventDefault()
+        } else if (key === 'b' && !e.repeat) {
+          this.dashQueued = true
+        }
+        return
+      }
       if (key === ' ' && !e.repeat) {
         this.dashQueued = true
         e.preventDefault()
@@ -62,6 +94,16 @@ export class Input {
     this.pointer = null
     this.keys.clear()
     this.dashQueued = false
+  }
+
+  /** Set when an arrow, Space or Escape should drop any click target (the caller clears it). */
+  stickyCleared = false
+
+  /** A click made in sticky mode, once. */
+  takeClick() {
+    const c = this.pendingClick
+    this.pendingClick = null
+    return c
   }
 
   /** True once per Space press or double-tap. */
