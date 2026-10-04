@@ -1,5 +1,6 @@
 import GUI from 'lil-gui'
 import { type Steer, newBrain, think } from './ai'
+import { Sound, haptic } from './audio'
 import { WORLD, tuning } from './config'
 import { Dust } from './dust'
 import { Effects } from './effects'
@@ -69,6 +70,12 @@ const canvas = document.querySelector<HTMLCanvasElement>('#game')!
 const ctx = canvas.getContext('2d')!
 const view = new View()
 const input = new Input(canvas)
+const sound = new Sound()
+
+/** Stereo position for something at world x, from where it is on screen. */
+function panAt(x: number) {
+  return clamp((view.sx(x) / view.w) * 2 - 1, -1, 1) * 0.7
+}
 
 let fluid: Fluid
 let player: Protocell
@@ -249,6 +256,8 @@ function simulate(dt: number) {
       if (!c.dash()) continue
       fluid.push(c.jetX, c.jetY, c.R * 1.3, -c.facingX * 2500, -c.facingY * 2500)
       effects.ripple(c.jetX, c.jetY, c.palette.rim, 0.6)
+      sound.whoosh(panAt(c.cx))
+      haptic(12)
     }
   }
   updateFocus()
@@ -339,6 +348,10 @@ function interact() {
         const nx = dx / (d || 1)
         const ny = dy / (d || 1)
         const closing = (a.cvx - b.cvx) * nx + (a.cvy - b.cvy) * ny
+        if ((a === player || b === player || a.colony || b.colony) && closing > 25) {
+          sound.thud(closing / 120, panAt(a.cx))
+          if (closing > 60) haptic(8)
+        }
         if (a.traits.has('spikes')) tear(b, a, closing)
         if (b.traits.has('spikes')) tear(a, b, closing)
       }
@@ -365,8 +378,14 @@ function eat(eater: Protocell, prey: Protocell) {
   }
   prey.startEngulf(eater)
   effects.ripple(prey.cx, prey.cy, eater.palette.rim, 0.8)
-  if (prey.colony) effects.ripple(prey.cx, prey.cy, prey.palette.rim, 1.2)
+  if (prey.colony) {
+    effects.ripple(prey.cx, prey.cy, prey.palette.rim, 1.2)
+    sound.colonyLost(panAt(prey.cx))
+    haptic(40)
+  }
   if (eater === player) {
+    sound.gulp(panAt(prey.cx))
+    haptic(25)
     addMutagen(MUTAGEN_CELL)
     cellsEaten++
     updateHud()
@@ -381,6 +400,10 @@ function tear(victim: Protocell, spiky: Protocell, speed: number) {
   const lost = victim.biomass * bite * Math.min(1, speed / SPIKE_FULL_SPEED)
   if (spiky.traits.has('venom')) victim.poison = VENOM_TIME
   if (victim === player) addMutagen(MUTAGEN_HURT)
+  if (victim === player || spiky === player || victim.colony || spiky.colony) {
+    sound.tear(panAt(victim.cx))
+    haptic(15)
+  }
   victim.grow(-lost)
   // Spray from the side that was hit.
   const dx = wrapDelta(spiky.cx - victim.cx, WORLD)
@@ -419,6 +442,10 @@ function tear(victim: Protocell, spiky: Protocell, speed: number) {
 /** A thick membrane holds: the attacker is thrown back and the membrane cracks. */
 function repel(eater: Protocell, prey: Protocell) {
   if (prey === player) addMutagen(MUTAGEN_HURT)
+  if (prey === player || prey.colony) {
+    sound.clang(panAt(prey.cx))
+    haptic([30, 30, 30])
+  }
   prey.armor = 0
   prey.shielded = 1.2
   const dx = wrapDelta(prey.cx - eater.cx, WORLD)
@@ -518,6 +545,8 @@ function drawTendril() {
 function rupture(cell: Protocell, eater: Protocell) {
   cell.gone = true
   deathTime = time
+  sound.rupture(panAt(cell.cx))
+  haptic([60, 40, 140])
   const organics = clamp(Math.round(cell.biomass * 50), 35, 140)
   const lipids = Math.round(cell.biomass * 4) + 2
   for (let i = 0; i < organics + lipids; i++) {
@@ -583,6 +612,7 @@ function feed(dt: number) {
         }
         if (cell === player && n.kind === 'mineral') addMutagen(MUTAGEN_MINERAL)
         if (cell === player) {
+          sound.absorb(n.kind, panAt(n.x))
           effects.ripple(n.x, n.y, NUTRIENT_RGB[n.kind])
           eaten[n.kind]++
           updateHud()
@@ -611,6 +641,8 @@ function mutate(forced?: MutationInfo) {
   mutagenNeeded += MUTAGEN_STEP
   player.addMutation(m.id)
   mutationSlow = 0.8
+  sound.mutation()
+  haptic([20, 60, 20])
   effects.ripple(player.cx, player.cy, '200,140,255', 1.2)
   hud.mutationName.textContent = m.name
   hud.mutationGood.textContent = m.good
@@ -700,6 +732,8 @@ function beginTransition() {
   phase = 'colony'
   phaseTime = 0
   input.release()
+  sound.transitionBegin()
+  haptic(80)
   const traits = [...player.traits]
   const each = (player.biomass * COLONY_SHARE) / COLONY_CELLS
   for (let i = 0; i < COLONY_CELLS; i++) {
@@ -858,6 +892,8 @@ function mutationList() {
 
 function completeTransition() {
   phase = 'complete'
+  sound.transitionComplete()
+  haptic([30, 50, 30, 50, 90])
   hud.banner.classList.remove('shown')
   const result = lineage ?? lineageFor([...player.traits])
   const discovered = recordLineage(result.name)
@@ -876,6 +912,7 @@ function completeTransition() {
 
 function failTransition() {
   deathTime = time
+  sound.rupture(0)
   hud.banner.classList.remove('shown')
   const seconds = Math.round(time - startTime)
   hud.deathTitle.textContent = 'The colony was devoured'
@@ -972,6 +1009,8 @@ function choose(id: TraitId) {
   player.addTrait(id)
   evolutions++
   closeChoice()
+  sound.evolve()
+  haptic(30)
   input.release()
   effects.ripple(player.cx, player.cy, player.palette.rim, 1.2)
   updateHud()
@@ -1030,6 +1069,21 @@ window.addEventListener('keydown', e => {
   const card = hud.cards.children[Number(e.key) - 1] as HTMLButtonElement | undefined
   card?.click()
 })
+
+/** 0..1: how strongly something much bigger than you is bearing down (drives the rumble). */
+function looming() {
+  if (deathTime !== null || phase === 'complete') return 0
+  let most = 0
+  for (const c of cells) {
+    if (c === player || c.colony || c.gone || c.engulfedBy) continue
+    const size = clamp((c.R / focus.r - 1.3) / 2, 0, 1)
+    if (size <= 0) continue
+    const d = Math.hypot(wrapDelta(c.cx - focus.x, WORLD), wrapDelta(c.cy - focus.y, WORLD))
+    const near = clamp(1 - (d - c.R) / (c.R * 3 + 220), 0, 1)
+    most = Math.max(most, size * near)
+  }
+  return most
+}
 
 function updateCamera(dt: number) {
   // Follow with a little lag and look-ahead, so speed reads as the cell drifting off-centre.
@@ -1097,6 +1151,7 @@ const hud = {
   lineageStats: document.querySelector<HTMLElement>('#lineage .stats')!,
   lineageDiscovered: document.querySelector<HTMLElement>('#lineage .discovered')!,
   goal: document.querySelector<HTMLElement>('#goal b')!,
+  sound: document.querySelector<HTMLButtonElement>('#sound')!,
   mutations: document.querySelector<HTMLElement>('#mutations')!,
   mutation: document.querySelector<HTMLElement>('#mutation')!,
   mutationName: document.querySelector<HTMLElement>('#mutation .name')!,
@@ -1122,6 +1177,16 @@ function updateHud() {
 function tryRestart() {
   if (deathTime !== null && time - deathTime > 1.2) reset()
 }
+function toggleSound() {
+  const muted = sound.toggleMute()
+  hud.sound.textContent = muted ? 'sound off' : 'sound on'
+}
+hud.sound.textContent = sound.muted ? 'sound off' : 'sound on'
+hud.sound.addEventListener('click', toggleSound)
+window.addEventListener('keydown', e => {
+  if (e.key.toLowerCase() === 'm' && !(e.target instanceof HTMLInputElement)) toggleSound()
+})
+
 canvas.addEventListener('pointerdown', tryRestart)
 window.addEventListener('keydown', tryRestart)
 
@@ -1163,6 +1228,7 @@ const flagFolder = gui.addFolder('Flagellum')
 flagFolder.add(tuning, 'flagellumPower', 0, 5).name('power')
 flagFolder.add(tuning, 'flagellumTurn', 0, 800).name('turn')
 gui.add({ evolve: () => checkEvolutionNow() }, 'evolve').name('evolve now')
+gui.add({ volume: 0.7 }, 'volume', 0, 1).onChange((v: number) => sound.setVolume(v))
 gui.add(tuning, 'showFlow').name('show flow')
 gui.add({ reset }, 'reset')
 gui.close()
@@ -1191,6 +1257,7 @@ function frame(now: number) {
   updateFocus()
   updateCamera(elapsed)
   render()
+  sound.update(looming())
   hud.transitionBtn.classList.toggle('shown', transitionReady() && !confirming)
 
   if (input.used) hud.hint.classList.add('hidden')
@@ -1244,6 +1311,7 @@ if (import.meta.env.DEV) {
       get colony() {
         return colony
       },
+      sound,
       get nutrients() {
         return nutrients
       },

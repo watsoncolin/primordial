@@ -483,3 +483,17 @@ kbd {
   font-size: 12px;
   color: rgba(210, 170, 255, 0.8);
 }
+
+#sound {
+  position: fixed;
+  right: calc(12px + env(safe-area-inset-right));
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  padding: 4px 8px;
+  border: 1px solid rgba(200, 235, 240, 0.25);
+  border-radius: 8px;
+  background: rgba(4, 20, 28, 0.5);
+  color: rgba(200, 235, 240, 0.6);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
