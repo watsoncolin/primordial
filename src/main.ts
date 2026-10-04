@@ -154,10 +154,11 @@ function interact() {
       if (dx > reach || dx < -reach || dy > reach || dy < -reach) continue
       const d = Math.hypot(dx, dy)
       if (d > reach) continue
+      // Swallowing starts once the prey's centre reaches the membrane; the engulf pulls it the rest of the way.
       if (a.canEat(b)) {
-        if (d < a.R - b.R * 0.2) eat(a, b)
+        if (d < a.R) eat(a, b)
       } else if (b.canEat(a)) {
-        if (d < b.R - a.R * 0.2) eat(b, a)
+        if (d < b.R) eat(b, a)
       } else {
         a.pushOutOf(b)
         b.pushOutOf(a)

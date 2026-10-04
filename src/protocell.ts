@@ -208,7 +208,8 @@ export class Protocell {
 
     // Weak, rhythmic propulsion — a protocell squirms more than it swims.
     const pulse = 1 - tuning.pulse * (0.5 - 0.5 * Math.sin(time * tuning.pulseRate * TAU))
-    const massFactor = Math.pow(this.biomass, MASS_EXPONENT - 1)
+    // Heavier cells accelerate less; lighter ones don't get a bonus, or small prey would outrun everything.
+    const massFactor = Math.min(1, Math.pow(this.biomass, MASS_EXPONENT - 1))
     const thrust = tuning.thrust * THRUST_SCALE[this.species] * this.boost * massFactor * mag * pulse
     this.thrust = thrust
 

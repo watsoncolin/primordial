@@ -6,6 +6,10 @@ import type { Protocell } from './protocell'
 const RETARGET = 0.4
 const GRAZER_SENSE = 260
 const FLEE_SENSE = 100
+/** Seconds a cell can sprint away before tiring, and how long it stays tired. */
+const FLEE_STAMINA = 2.5
+const EXHAUSTED_TIME = 2
+const EXHAUSTED_EFFORT = 0.35
 /** Engulfers lunge when prey is this close to their membrane. */
 const LUNGE_RANGE = 80
 const LUNGE_TIME = 0.9
@@ -20,6 +24,8 @@ export interface Brain {
   rest: number
   lunge: number
   lungeCooldown: number
+  fleeTime: number
+  exhausted: number
 }
 
 export function newBrain(): Brain {
@@ -32,6 +38,8 @@ export function newBrain(): Brain {
     rest: 0,
     lunge: 0,
     lungeCooldown: 0,
+    fleeTime: 0,
+    exhausted: 0,
   }
 }
 
@@ -53,11 +61,23 @@ export function think(cell: Protocell, dt: number, cells: Protocell[], nutrients
   cell.boost = brain.lunge > 0 ? tuning.engulferLunge : 1
 
   const threat = nearestCell(cell, cells, FLEE_SENSE + cell.R, other => other.canEat(cell))
+  brain.exhausted = Math.max(0, brain.exhausted - dt)
   if (threat) {
     steerAt(cell, threat.cx, threat.cy, -1, out)
     brain.prey = null
+    // Sprinting away burns out; a persistent chaser gets its chance.
+    if (brain.exhausted > 0) {
+      out.mag = EXHAUSTED_EFFORT
+    } else {
+      brain.fleeTime += dt
+      if (brain.fleeTime > FLEE_STAMINA) {
+        brain.fleeTime = 0
+        brain.exhausted = EXHAUSTED_TIME
+      }
+    }
     return out
   }
+  brain.fleeTime = Math.max(0, brain.fleeTime - dt * 0.5)
 
   brain.retarget -= dt
   if (brain.retarget <= 0) {
