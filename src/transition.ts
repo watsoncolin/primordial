@@ -89,6 +89,8 @@ export interface Lineage {
   formation: Formation
   /** Which branch shaped it: one branch, 'hybrid' for an even pair, or 'none' for a generalist. */
   branch: Branch | 'hybrid' | 'none'
+  /** The one or two branches behind its form (empty for a generalist). */
+  branches: Branch[]
 }
 
 export type { Branch }
@@ -131,6 +133,7 @@ export function lineageFor(traits: TraitId[]): Lineage {
     form,
     formation: branches.some(b => b === 'predation' || b === 'mobility') ? 'chain' : 'cluster',
     branch: branches.length === 2 ? 'hybrid' : (branches[0] ?? 'none'),
+    branches,
   }
 }
 

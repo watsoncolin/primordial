@@ -44,6 +44,17 @@ export class TreeOfLife {
     this.shop = root.querySelector('.shop')!
     this.header = root.querySelector('.summary')!
     root.querySelector('[data-action="close"]')!.addEventListener('click', () => this.close())
+    const copy = root.querySelector<HTMLButtonElement>('[data-action="copy"]')!
+    copy.addEventListener('click', async () => {
+      // Every run with its telemetry, as JSON, for playtest notes and analysis.
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(this.save.runs, null, 2))
+        copy.textContent = 'Copied'
+      } catch {
+        copy.textContent = 'Copy failed'
+      }
+      setTimeout(() => (copy.textContent = 'Copy run data'), 1500)
+    })
   }
 
   get isOpen() {
@@ -208,6 +219,13 @@ export class TreeOfLife {
       ['Adaptations', traits],
       ['Mutations', muts],
       ['DNA earned', String(r.dna)],
+      ...(r.stats
+        ? [
+            ['Ended by', r.stats.cause],
+            ['First evolution', r.stats.firstEvolutionAt === null ? 'none' : `${r.stats.firstEvolutionAt}s`],
+            ['Ready to transition', r.stats.transitionReadyAt === null ? 'never' : `${r.stats.transitionReadyAt}s`],
+          ]
+        : []),
     ]) {
       const dt = document.createElement('dt')
       dt.textContent = k

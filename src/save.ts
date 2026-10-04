@@ -52,6 +52,25 @@ export interface RunRecord {
   cellsEaten: number
   dna: number
   date: number
+  /** Playtest telemetry (absent on runs recorded before it existed). */
+  stats?: RunStats
+}
+
+/** What a playtest needs from each run. Times are seconds since the run started. */
+export interface RunStats {
+  firstEvolutionAt: number | null
+  /** When both Great Transition requirements were first met. */
+  transitionReadyAt: number | null
+  /** What ended the run: the species that swallowed you, 'colony' (devoured during the transition), or 'lineage'. */
+  cause: string
+  /** Each adaptation in the order taken, with when. */
+  evolutions: { trait: TraitId; at: number }[]
+  /** Cells you swallowed, by species. */
+  eaten: Record<string, number>
+  /** Seconds spent in each habitat: zone types, 'vent' (near an ordinary vent), 'cloud' (in a food cloud). */
+  habitat: Record<string, number>
+  /** Colony cells alive when the transition ended (null if it was never attempted). */
+  transitionSurvivors: number | null
 }
 
 export interface Save {

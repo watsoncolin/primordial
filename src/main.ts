@@ -1,5 +1,19 @@
 import GUI from 'lil-gui'
-import { type Steer, newBrain, think } from './ai'
+import { type Steer, aiWorld, newBrain, think } from './ai'
+import {
+  FILTER_CONTRACT,
+  FILTER_REACH,
+  PRODUCER_CAP,
+  PRODUCER_SHED_ABOVE,
+  PRODUCER_SHED_INTERVAL,
+  PRODUCER_SHED_SHARE,
+  ROLE_SIZE,
+  filterSite,
+  isThermalVent,
+  outOfView,
+  producerSpot,
+  scavengerSpot,
+} from './habitats'
 import { Sound, haptic } from './audio'
 import {
   UV_MUTAGEN,
@@ -13,7 +27,7 @@ import {
   placeZones,
   rescaleZones,
 } from './biomes'
-import { WORLD, tuning } from './config'
+import { PROTOCELL_RADIUS, WORLD, tuning } from './config'
 import { Dust } from './dust'
 import { Effects } from './effects'
 import { Fluid } from './fluid'
@@ -54,8 +68,10 @@ import {
   STICKY_REACH,
   rollMutation,
 } from './mutations'
-import { type DnaLine, type RunRecord, dnaFor, loadSave, writeSave } from './save'
+import { type DnaLine, type RunRecord, type RunStats, dnaFor, loadSave, writeSave } from './save'
 import { Senses } from './senses'
+import { drawFold, drawLightPlate } from './anatomy'
+import { traitPreview } from './preview'
 import { TreeOfLife } from './tree'
 import {
   ASSEMBLY_TIME,
@@ -197,6 +213,26 @@ let effects: Effects
 let senses: Senses
 let eaten: Record<Kind, number>
 let cellsEaten = 0
+/** Playtest telemetry for the current run (saved with its record). */
+let stats: RunStats = freshStats()
+let habitatTimer = 0
+
+function freshStats(): RunStats {
+  return {
+    firstEvolutionAt: null,
+    transitionReadyAt: null,
+    cause: '',
+    evolutions: [],
+    eaten: {},
+    habitat: {},
+    transitionSurvivors: null,
+  }
+}
+
+/** Seconds since this run began. */
+function runTime() {
+  return Math.round((time - startTime) * 10) / 10
+}
 let peakBiomass = 1
 /** Evolutions granted for free (Genetic Memory); they don't push up the mineral cost of the next one. */
 let freeEvolutions = 0
@@ -283,6 +319,8 @@ function reset() {
   senses = new Senses()
   eaten = { organic: 0, lipid: 0, mineral: 0 }
   cellsEaten = 0
+  stats = freshStats()
+  habitatTimer = 0
   peakBiomass = 1
   freeEvolutions = 0
   mutagen = 0
@@ -305,12 +343,22 @@ function reset() {
   hud.lineage.classList.remove('shown')
   hud.banner.classList.remove('shown')
   hud.deathTitle.textContent = 'Membrane ruptured'
-  for (let i = 0; i < tuning.grazers; i++) spawnCell('grazer', 300)
-  for (let i = 0; i < tuning.engulfers; i++) spawnCell('engulfer', 600)
+  aiWorld.zones = zones
+  aiWorld.vents = vents
+  // Camera first: spawning keeps new cells out of view, which needs to know where the view is.
   updateFocus()
   view.x = player.cx
   view.y = player.cy
   view.zoom = targetZoom()
+  for (let i = 0; i < tuning.grazers; i++) spawnCell('grazer', 300)
+  for (let i = 0; i < tuning.producers; i++) spawnCell('producer', 450)
+  for (let i = 0; i < tuning.scavengers; i++) spawnCell('scavenger', 450)
+  for (let i = 0; i < tuning.filters; i++) spawnCell('filter', 450)
+  for (let i = 0; i < tuning.engulfers; i++) {
+    // A quiet opening: hunters start far off and don't hunt for the first few seconds.
+    const h = spawnCell('engulfer', 600)
+    if (h?.brain) h.brain.rest = 6
+  }
   hud.death.classList.remove('shown')
   // Prestige unlocks shape the start of every run.
   if (save.unlocks.includes('heritableMutation') && save.inherited) player.addMutation(save.inherited)
@@ -322,28 +370,125 @@ function reset() {
 }
 
 /** New cells are sized relative to the player, so the ecosystem keeps pace as you grow. */
-function spawnCell(species: Species, minDist: number) {
-  const ratio = species === 'engulfer' ? rand(2.8, 4.5) : Math.exp(rand(Math.log(0.12), Math.log(1.3)))
+/** Dev checks: every spawn, whether it was out of view and in a valid habitat. */
+const spawnLog: { species: string; outOfView: boolean; inHabitat: boolean; phase: Phase }[] = []
+/** Dev checks: the player (and colony) can't be eaten, so long simulated checks don't end early. */
+let devGod = false
+/** Dev checks: how many times light colonies have shed food. */
+let devShed = 0
+
+/** Is (x, y) a valid home for this role right now? */
+function inHabitat(species: Species, x: number, y: number) {
+  if (species === 'producer') return zones.some(z => z.type === 'uv' && z.strengthAt(x, y) > 0)
+  if (species === 'scavenger' || species === 'filter') {
+    const nearVent = vents.some(
+      v => !isThermalVent(v, zones) && Math.hypot(wrapDelta(x - v.x, WORLD), wrapDelta(y - v.y, WORLD)) < v.r * 4,
+    )
+    return nearVent && !zones.some(z => z.type === 'thermal' && z.strengthAt(x, y) > 0)
+  }
+  return true
+}
+
+/** How far from the focus counts as off screen (half the view's diagonal, in world units, plus a margin). */
+function viewRadius() {
+  return Math.hypot(view.w, view.h) / 2 / view.zoom + 60
+}
+
+/**
+ * New cells are sized relative to the player, so the ecosystem keeps pace as you grow, and placed
+ * in their habitat, out of sight. A role with no valid habitat right now falls back to a protocell.
+ */
+function spawnCell(species: Exclude<Species, 'player' | 'offspring'>, minDist: number) {
+  const [lo, hi] = ROLE_SIZE[species]
+  const ratio = species === 'grazer' ? Math.exp(rand(Math.log(lo), Math.log(hi))) : rand(lo, hi)
+  const away = Math.max(minDist, viewRadius())
   let x = 0
   let y = 0
-  for (let tries = 0; tries < 20; tries++) {
-    x = rand(0, WORLD)
-    y = rand(0, WORLD)
-    const far = Math.hypot(wrapDelta(x - focus.x, WORLD), wrapDelta(y - focus.y, WORLD)) > minDist
-    const clear = vents.every(v => Math.hypot(wrapDelta(x - v.x, WORLD), wrapDelta(y - v.y, WORLD)) > v.r * 3)
-    if (far && clear) break
+  let anchor: { x: number; y: number; ux: number; uy: number } | null = null
+  if (species === 'producer' || species === 'scavenger') {
+    const spot =
+      species === 'producer'
+        ? producerSpot(zones, focus.x, focus.y, away)
+        : scavengerSpot(vents, zones, focus.x, focus.y, away)
+    if (!spot) return spawnCell('grazer', minDist)
+    ;[x, y] = spot
+  } else if (species === 'filter') {
+    const feederR = PROTOCELL_RADIUS * Math.sqrt((player.biomass * ratio) / scale.biomass)
+    anchor = filterSite(vents, zones, cells, fluid, focus.x, focus.y, away, feederR)
+    if (!anchor) return spawnCell('grazer', minDist)
+  } else {
+    // Out of view and clear of vents; if nothing qualifies, the farthest candidate (never on screen).
+    let best = -1
+    for (let tries = 0; tries < 30; tries++) {
+      const cx = rand(0, WORLD)
+      const cy = rand(0, WORLD)
+      const d = Math.hypot(wrapDelta(cx - focus.x, WORLD), wrapDelta(cy - focus.y, WORLD))
+      const clear = vents.every(v => Math.hypot(wrapDelta(cx - v.x, WORLD), wrapDelta(cy - v.y, WORLD)) > v.r * 3)
+      const score = d + (clear ? WORLD : 0)
+      if (score > best) {
+        best = score
+        x = cx
+        y = cy
+      }
+      if (d > away && clear) break
+    }
   }
-  const cell = new Protocell(x, y, player.biomass * ratio, species)
+  const biomass = player.biomass * ratio
+  if (anchor) {
+    // The cup sits just off the rock on its stalk, opening into the current.
+    const r = PROTOCELL_RADIUS * Math.sqrt(biomass / scale.biomass)
+    x = anchor.x + anchor.ux * r * 1.6
+    y = anchor.y + anchor.uy * r * 1.6
+  }
+  const cell = new Protocell(x, y, biomass, species)
   cell.brain = newBrain()
+  // Born facing its stalk's direction (filter feeders) or any way at all.
+  const heading = rand(0, TAU)
+  if (anchor) cell.orient(anchor.ux, anchor.uy)
+  else cell.orient(Math.cos(heading), Math.sin(heading))
+  if (anchor) {
+    cell.anchorX = anchor.x
+    cell.anchorY = anchor.y
+    cell.anchorOutX = anchor.ux
+    cell.anchorOutY = anchor.uy
+  }
+  if (species === 'producer') {
+    // Light colonies live in the sunlight: shared photosynthesis and UV rules, with a size cap.
+    cell.addTrait('photosynthesis')
+    cell.addTrait('pigment')
+    cell.growthCap = biomass * PRODUCER_CAP
+    cell.roleTimer = rand(...PRODUCER_SHED_INTERVAL)
+  }
+  // Scavengers carry the same thick membrane (plates, armour, reseal) the player can evolve.
+  if (species === 'scavenger') cell.addTrait('membrane')
   cells.push(cell)
+  if (import.meta.env.DEV) {
+    spawnLog.push({
+      species,
+      outOfView: outOfView(cell.cx, cell.cy, focus.x, focus.y, viewRadius() - 60),
+      // A filter feeder's home is where its stalk meets the rock.
+      inHabitat: cell.anchored ? inHabitat(species, cell.anchorX, cell.anchorY) : inHabitat(species, cell.cx, cell.cy),
+      phase,
+    })
+  }
+  return cell
 }
 
 function maintainPopulation(dt: number) {
   populationTimer -= dt
   if (populationTimer > 0) return
   populationTimer = POPULATION_CHECK
-  const alive = (s: Species) => cells.filter(c => c.species === s && !c.engulfedBy).length
-  if (alive('grazer') < tuning.grazers) spawnCell('grazer', 450)
+  const alive = (sp: Species) => cells.filter(c => c.species === sp && !c.engulfedBy && !c.gone).length
+  // Habitat roles first; a role with nowhere to live falls back to a protocell, but never past
+  // the total, so a missing habitat doesn't flood the world with protocells.
+  const peaceful = tuning.grazers + tuning.producers + tuning.scavengers + tuning.filters
+  const peacefulAlive = alive('grazer') + alive('producer') + alive('scavenger') + alive('filter')
+  if (peacefulAlive < peaceful) {
+    if (alive('producer') < tuning.producers) spawnCell('producer', 450)
+    else if (alive('scavenger') < tuning.scavengers) spawnCell('scavenger', 450)
+    else if (alive('filter') < tuning.filters) spawnCell('filter', 450)
+    else spawnCell('grazer', 450)
+  }
   // Dividing draws a crowd: extra predators while the colony is vulnerable.
   const engulfers = tuning.engulfers + (phase === 'colony' ? 2 : 0)
   if (alive('engulfer') < engulfers) spawnCell('engulfer', phase === 'colony' ? 450 : 600)
@@ -412,6 +557,7 @@ function simulate(dt: number) {
         mag = Math.max(mag, 0.75)
       }
     }
+    if (!cell.engulfedBy) roleUpkeep(cell, dt)
     if (!cell.engulfedBy) {
       const exposure = applyHazards(cell, zones, dt)
       if (cell === player && phase === 'living') {
@@ -421,6 +567,7 @@ function simulate(dt: number) {
       }
     }
     for (let i = 0; i < SUBSTEPS; i++) cell.step(dt / SUBSTEPS, fluid, sx, sy, mag, time, vents)
+    cell.clearAim()
 
     // Each cell drags water along with it, and its thrust shoves water out the back.
     fluid.dragToward(cell.cx, cell.cy, cell.R * 1.05, cell.cvx, cell.cvy, tuning.wake)
@@ -446,7 +593,11 @@ function simulate(dt: number) {
   if (living) checkEvolution()
   if (alive) advanceTransition(dt)
   if (living) mutationEffects(dt)
-  if (living) peakBiomass = Math.max(peakBiomass, player.biomass)
+  if (living) {
+    peakBiomass = Math.max(peakBiomass, player.biomass)
+    if (stats.transitionReadyAt === null && transitionReady()) stats.transitionReadyAt = runTime()
+    trackHabitat(dt)
+  }
   stockZones(dt)
   if (living && needsRescale(player)) {
     const k = rescaleWorld(player, cells, nutrients, vents, fluid, effects)
@@ -461,6 +612,56 @@ function simulate(dt: number) {
   if (alive) maintainPopulation(dt)
 }
 
+/** Telemetry: where the player spends time (checked twice a second). */
+function trackHabitat(dt: number) {
+  habitatTimer += dt
+  if (habitatTimer < 0.5) return
+  const span = habitatTimer
+  habitatTimer = 0
+  const add = (key: string) => (stats.habitat[key] = Math.round(((stats.habitat[key] ?? 0) + span) * 10) / 10)
+  for (const z of zones) if (z.strengthAt(player.cx, player.cy) > 0) add(z.type)
+  if (vents.some(v => !isThermalVent(v, zones) && !outOfView(player.cx, player.cy, v.x, v.y, v.r * 4))) add('vent')
+  if (nutrients.near(player.cx, player.cy, 120, 'organic') >= 8) add('cloud')
+}
+
+/** Per-role upkeep each step: filter feeders face into the current, light colonies shed food. */
+function roleUpkeep(cell: Protocell, dt: number) {
+  if (cell.anchored) {
+    fluid.sample(cell.cx, cell.cy)
+    const speed = Math.hypot(fluid.su, fluid.sv)
+    const ux = speed > 2 ? -fluid.su / speed : 0
+    const uy = speed > 2 ? -fluid.sv / speed : 0
+    // Into the oncoming current, but never back into its own rock: then it faces straight out.
+    if (speed > 2 && ux * cell.anchorOutX + uy * cell.anchorOutY > -0.1) cell.aim(ux, uy)
+    else cell.aim(cell.anchorOutX, cell.anchorOutY)
+  }
+  if (cell.species === 'producer') {
+    cell.roleTimer -= dt
+    if (cell.roleTimer <= 0) {
+      cell.roleTimer = rand(...PRODUCER_SHED_INTERVAL)
+      // Shed a little of itself as organics (counted in the world's food budget), only once grown.
+      if (cell.biomass > cell.baseBiomass * PRODUCER_SHED_ABOVE) {
+        const count = 2 + Math.floor(Math.random() * 2)
+        const each = cell.biomass * PRODUCER_SHED_SHARE
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, TAU)
+          nutrients.spawn(
+            'organic',
+            cell.cx + Math.cos(a) * cell.R * 1.1,
+            cell.cy + Math.sin(a) * cell.R * 1.1,
+            cell.cvx + Math.cos(a) * 15,
+            cell.cvy + Math.sin(a) * 15,
+            0.5,
+            each,
+          )
+        }
+        cell.grow(-each * count)
+        devShed++
+      }
+    }
+  }
+}
+
 /** Each hostile zone keeps a stock of the food that makes it worth braving. */
 function stockZones(dt: number) {
   zoneFoodTimer -= dt
@@ -471,7 +672,18 @@ function stockZones(dt: number) {
     const d = Math.sqrt(Math.random()) * z.r * 0.75
     return [z.x + Math.cos(a) * d, z.y + Math.sin(a) * d]
   }
+  // Restock only out of sight: a patch you're feeding on runs down until you leave it.
+  const away = viewRadius()
+  for (const v of vents) {
+    if (isThermalVent(v, zones) || !outOfView(v.x, v.y, focus.x, focus.y, away)) continue
+    // Vent debris: lipids gather near ordinary vents, for scavengers (and you).
+    if (nutrients.near(v.x, v.y, v.r * 4, 'lipid') < 6) {
+      const a = rand(0, TAU)
+      nutrients.lipidCluster(v.x + Math.cos(a) * v.r * 2.5, v.y + Math.sin(a) * v.r * 2.5)
+    }
+  }
   for (const z of zones) {
+    if (!outOfView(z.x, z.y, focus.x, focus.y, away + z.r)) continue
     if (z.type === 'thermal') {
       if (nutrients.near(z.x, z.y, z.r, 'mineral') < 12)
         for (let i = 0; i < 3; i++) nutrients.spawn('mineral', ...inside(z))
@@ -511,6 +723,9 @@ function interact() {
       } else if (d < a.R + b.R) {
         a.pushOutOf(b)
         b.pushOutOf(a)
+        // A bumped filter feeder pulls in its fringe for a moment.
+        if (a.species === 'filter') a.contract = FILTER_CONTRACT
+        if (b.species === 'filter') b.contract = FILTER_CONTRACT
         // Spikes tear whatever they ram (or get rammed by) hard enough.
         const nx = dx / (d || 1)
         const ny = dy / (d || 1)
@@ -533,6 +748,7 @@ function interact() {
 }
 
 function eat(eater: Protocell, prey: Protocell) {
+  if (devGod && (prey === player || prey.colony)) return
   // Grabbing something spiky costs you, whether or not you get it down.
   if (prey.traits.has('spikes')) tear(eater, prey, SPIKE_FULL_SPEED)
   if (prey.armor >= 1) {
@@ -551,6 +767,7 @@ function eat(eater: Protocell, prey: Protocell) {
     haptic(40)
   }
   if (eater === player) {
+    stats.eaten[prey.species] = (stats.eaten[prey.species] ?? 0) + 1
     sound.gulp(panAt(prey.cx))
     haptic(25)
     addMutagen(MUTAGEN_CELL)
@@ -649,7 +866,23 @@ let hazardWarning: Zone['type'] | null = null
 
 function aimPseudopod(cell: Protocell, dt: number) {
   tendrilTarget = null
-  if (!cell.traits.has('engulfing')) return
+  if (!cell.traits.has('engulfing')) {
+    // Without pseudopods, the body still leans toward something it's about to swallow.
+    cell.leanWant = 0
+    for (const other of cells) {
+      if (other === cell || other.gone || other.engulfedBy || !cell.canEat(other)) continue
+      const dx = wrapDelta(other.cx - cell.cx, WORLD)
+      const dy = wrapDelta(other.cy - cell.cy, WORLD)
+      const d = Math.hypot(dx, dy) || 1
+      if (d - cell.R - other.R < cell.R * 0.8) {
+        cell.leanWant = 1
+        cell.leanDirX = dx / d
+        cell.leanDirY = dy / d
+        break
+      }
+    }
+    return
+  }
   const tendril = cell.traits.has('tendril')
   let best: Protocell | null = null
   let bestGap = cell.R * (tendril ? TENDRIL_RANGE : 2)
@@ -714,6 +947,7 @@ function drawTendril() {
 function rupture(cell: Protocell, eater: Protocell) {
   cell.gone = true
   deathTime = time
+  stats.cause = eater.species
   recordRun('extinct', [])
   sound.rupture(panAt(cell.cx))
   haptic([60, 40, 140])
@@ -762,8 +996,10 @@ function feed(dt: number) {
   for (const cell of cells) {
     if (cell.engulfedBy || cell.gone) continue
     const R = cell.R
-    const sticky = cell.mutations.has('sticky')
-    const reach = R + (sticky ? STICKY_REACH : 8)
+    // Light colonies live on light; a contracted filter feeder isn't feeding.
+    if (cell.species === 'producer' || (cell.species === 'filter' && cell.contract > 0)) continue
+    const sticky = cell.mutations.has('sticky') || cell.species === 'filter'
+    const reach = R + (cell.species === 'filter' ? FILTER_REACH : sticky ? STICKY_REACH : 8)
     for (const n of nutrients.items) {
       if (n.dead || n.grace > 0 || n.fading || (n.toxic && cell === player)) continue
       const dx = wrapDelta(n.x - cell.cx, WORLD)
@@ -1102,6 +1338,7 @@ function recordRun(outcome: RunRecord['outcome'], dna: DnaLine[], name = '', for
     cellsEaten,
     dna: total,
     date: Date.now(),
+    stats: { ...stats, cause: stats.cause || (outcome === 'lineage' ? 'lineage' : 'unknown') },
   })
   save.dna += total
   if (outcome === 'lineage') save.generation++
@@ -1132,6 +1369,7 @@ function completeTransition() {
   hud.lineageDiscovered.textContent =
     discovered === null ? '' : `${discovered} ${discovered === 1 ? 'lineage' : 'lineages'} discovered`
   peakBiomass = Math.max(peakBiomass, player.biomass)
+  stats.transitionSurvivors = colony.length
   const dna = dnaFor({
     cellsEaten,
     evolutions,
@@ -1147,6 +1385,8 @@ function completeTransition() {
 
 function failTransition() {
   deathTime = time
+  stats.cause = 'colony'
+  stats.transitionSurvivors = colony.length
   recordRun('extinct', [])
   sound.rupture(0)
   hud.banner.classList.remove('shown')
@@ -1157,6 +1397,110 @@ function failTransition() {
     `Survived ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} · ` +
     `peak biomass ×${player.biomass.toFixed(2)} · ${cellsEaten} cells absorbed`
   hud.death.classList.add('shown')
+}
+
+/**
+ * The bound organism shows what its lineage became: a shared tail (Mobility), a leading feeding
+ * fold (Predation), outer plates (Defense), a rosette of light-catching lobes (Light) or a beating
+ * fringe (Senses). Hybrids get both of their features. `over` = drawn above the cells.
+ */
+function drawOrganismFeature(over: boolean) {
+  if ((phase !== 'assembling' && phase !== 'complete') || !lineage || !colony.length) return
+  const k = phase === 'complete' ? 1 : Math.min(1, phaseTime / ASSEMBLY_TIME)
+  if (k < 0.05) return
+  const z = view.zoom
+  const px = view.sx(focus.x)
+  const py = view.sy(focus.y)
+  const fx = Math.cos(formationAngle)
+  const fy = Math.sin(formationAngle)
+  // How far the body reaches forward and back along its axis, and its overall radius (screen px).
+  let ahead = 0
+  let behind = 0
+  for (const c of colony) {
+    const along = wrapDelta(c.cx - focus.x, WORLD) * fx + wrapDelta(c.cy - focus.y, WORLD) * fy
+    ahead = Math.max(ahead, along + c.R)
+    behind = Math.max(behind, -along + c.R)
+  }
+  ahead *= z
+  behind *= z
+  const r = focus.spread * z
+  const cell = focus.r * z
+  const rim = player.palette.rim
+  ctx.globalAlpha = k
+  for (const branch of lineage.branches) {
+    if (branch === 'mobility' && !over) {
+      // One shared tail out of the back, beating.
+      const n = 28
+      const len = Math.max(r, behind) * 2.2
+      // Flat joins: overlapping round caps on a translucent ribbon would bead at every joint.
+      ctx.lineCap = 'butt'
+      for (let i = 0; i < n; i++) {
+        const t0 = i / n
+        const t1 = (i + 1) / n
+        const at = (t: number) => {
+          const wave = Math.sin(time * 7 - t * 9) * cell * 0.9 * t
+          return [px - fx * (behind + len * t) - fy * wave, py - fy * (behind + len * t) + fx * wave]
+        }
+        const [ax, ay] = at(t0)
+        const [bx, by] = at(t1)
+        ctx.beginPath()
+        ctx.moveTo(ax, ay)
+        ctx.lineTo(bx, by)
+        ctx.lineWidth = Math.max(1.5, cell * 0.45 * (1 - t0 * 0.85))
+        ctx.strokeStyle = `rgba(${rim},${0.75 - 0.4 * t0})`
+        ctx.stroke()
+      }
+      ctx.lineCap = 'round'
+    } else if (branch === 'predation' && over) {
+      // A wide feeding fold across the front.
+      drawFold(ctx, px, py, ahead * 1.05, fx, fy, rim, 1)
+    } else if (branch === 'defense' && over) {
+      // Broad outer plates around the whole body.
+      ctx.lineCap = 'round'
+      for (let i = 0; i < 6; i++) {
+        const a0 = (i / 6) * Math.PI * 2 + formationAngle + 0.12
+        ctx.beginPath()
+        ctx.arc(px, py, r * 1.04, a0, a0 + (Math.PI * 2) / 6 - 0.24)
+        ctx.lineWidth = Math.max(3, cell * 0.35)
+        ctx.strokeStyle = `rgba(${rim},0.35)`
+        ctx.stroke()
+        ctx.lineWidth = Math.max(1.5, cell * 0.12)
+        ctx.strokeStyle = `rgba(${rim},0.8)`
+        ctx.stroke()
+      }
+    } else if (branch === 'light' && !over) {
+      // A rosette of green lobes, each with a light-catching plate.
+      for (let i = 0; i < 7; i++) {
+        const a = (i / 7) * Math.PI * 2 + formationAngle
+        const lx = px + Math.cos(a) * r * 0.95
+        const ly = py + Math.sin(a) * r * 0.95
+        ctx.beginPath()
+        ctx.ellipse(lx, ly, r * 0.32, r * 0.22, a, 0, Math.PI * 2)
+        ctx.fillStyle = 'rgba(110,210,100,0.16)'
+        ctx.fill()
+        ctx.lineWidth = Math.max(1, cell * 0.06)
+        ctx.strokeStyle = 'rgba(165,235,135,0.6)'
+        ctx.stroke()
+        drawLightPlate(ctx, lx, ly, r * 0.12, a + Math.PI / 2, 1)
+      }
+    } else if (branch === 'senses' && over) {
+      // A beating fringe all the way round.
+      ctx.beginPath()
+      for (let i = 0; i < 48; i++) {
+        const a = (i / 48) * Math.PI * 2
+        const beat = Math.sin(time * 9 - i * 0.7) * 0.35
+        const sx0 = px + Math.cos(a) * r
+        const sy0 = py + Math.sin(a) * r
+        ctx.moveTo(sx0, sy0)
+        ctx.lineTo(sx0 + Math.cos(a + beat) * cell * 0.7, sy0 + Math.sin(a + beat) * cell * 0.7)
+      }
+      ctx.lineCap = 'round'
+      ctx.lineWidth = Math.max(1, cell * 0.06)
+      ctx.strokeStyle = `rgba(${rim},0.7)`
+      ctx.stroke()
+    }
+  }
+  ctx.globalAlpha = 1
 }
 
 /** Membrane bridges between neighbouring colony cells as they bind. */
@@ -1258,7 +1602,10 @@ function openChoice(
     title,
     subtitle,
     options.map(trait => ({
-      icon: TRAIT_ICONS[trait.id],
+      // The card shows your own body with this adaptation, not just a symbol.
+      icon:
+        `<img class="preview" src="${traitPreview(trait.id, player.traits)}" alt="">` +
+        `<span class="badge">${TRAIT_ICONS[trait.id]}</span>`,
       name: trait.name,
       note: trait.requires
         ? `evolves from ${TRAITS[trait.requires].name}`
@@ -1280,6 +1627,9 @@ function closeChoice() {
 function choose(id: TraitId) {
   if (!choosing) return
   player.addTrait(id)
+  player.emphasis = 1
+  stats.evolutions.push({ trait: id, at: runTime() })
+  if (stats.firstEvolutionAt === null) stats.firstEvolutionAt = runTime()
   evolutions++
   closeChoice()
   sound.evolve()
@@ -1403,11 +1753,13 @@ function render() {
   for (const vent of vents) vent.draw(ctx, view, time)
   nutrients.draw(ctx, view, time)
   // Cells being swallowed draw on top of whatever is swallowing them; the player draws above its peers.
-  for (const cell of cells) if (!cell.engulfedBy && cell !== player && !cell.colony) cell.draw(ctx, view)
+  for (const cell of cells) if (!cell.engulfedBy && cell !== player && !cell.colony) cell.draw(ctx, view, time)
+  drawOrganismFeature(false)
   drawBridges()
-  for (const cell of colony) cell.draw(ctx, view)
-  if (!player.gone) player.draw(ctx, view)
-  for (const cell of cells) if (cell.engulfedBy) cell.draw(ctx, view)
+  for (const cell of colony) cell.draw(ctx, view, time)
+  drawOrganismFeature(true)
+  if (!player.gone) player.draw(ctx, view, time)
+  for (const cell of cells) if (cell.engulfedBy) cell.draw(ctx, view, time)
   drawTendril()
   effects.draw(ctx, view)
   let dark = 0
@@ -1547,7 +1899,10 @@ cellFolder.add(tuning, 'stiffness', 10, 400)
 cellFolder.add(tuning, 'wobbleDamping', 0, 15).name('wobble damping')
 cellFolder.add(tuning, 'capture', 0, 800)
 const ecoFolder = gui.addFolder('Ecosystem')
-ecoFolder.add(tuning, 'grazers', 0, 30, 1)
+ecoFolder.add(tuning, 'grazers', 0, 30, 1).name('protocells')
+ecoFolder.add(tuning, 'producers', 0, 10, 1).name('light colonies')
+ecoFolder.add(tuning, 'scavengers', 0, 10, 1).name('scavengers')
+ecoFolder.add(tuning, 'filters', 0, 6, 1).name('filter feeders')
 ecoFolder.add(tuning, 'engulfers', 0, 8, 1)
 ecoFolder.add(tuning, 'engulferSense', 50, 500).name('engulfer sense')
 ecoFolder.add(tuning, 'engulferStamina', 1, 20).name('engulfer stamina')
@@ -1658,10 +2013,151 @@ if (import.meta.env.DEV) {
       get zones() {
         return zones
       },
-      /** Teleport the player into the first zone of a type. */
-      goto(type: Zone['type']) {
-        const z = zones.find(zone => zone.type === type)
-        if (!z) return
+      /**
+       * Targeted checks, one at a time (each simulates up to a minute): 'producers', 'habitats',
+       * 'rescale', 'armor', 'transition'. Returns pass/fail with the numbers behind it.
+       */
+      check(name: 'producers' | 'habitats' | 'rescale' | 'armor' | 'transition') {
+        const run = (seconds: number) => {
+          for (let i = 0; i < Math.round(seconds / STEP); i++) simulate(STEP)
+        }
+        const others = () => cells.filter(c => c !== player && !c.colony)
+        const spawnsOk = (since: number) => {
+          const log = spawnLog.slice(since)
+          return {
+            spawned: log.length,
+            outOfView: log.every(e => e.outOfView),
+            inHabitat: log.every(e => e.inHabitat),
+            bySpecies: log.reduce<Record<string, number>>((m, e) => ((m[e.species] = (m[e.species] ?? 0) + 1), m), {}),
+            failures: log.filter(e => !e.outOfView || !e.inHabitat).map(e => e.species),
+          }
+        }
+        devGod = true
+        try {
+          if (name === 'producers') {
+            // Light colonies start just under their cap and bask for 30 s: they must never pass it,
+            // must shed food as they go, and the world's food must stay within budget.
+            const p = cells.filter(c => c.species === 'producer')
+            for (const c of p) c.grow(c.growthCap * 0.99 - c.biomass)
+            devShed = 0
+            let maxOver = 0
+            for (let t = 0; t < 30; t++) {
+              run(1)
+              for (const c of p) maxOver = Math.max(maxOver, c.biomass / c.growthCap)
+            }
+            const organics = nutrients.count.organic
+            return {
+              pass: p.length > 0 && maxOver <= 1.001 && devShed > 0 && organics < 450,
+              producers: p.length,
+              peakOfCap: maxOver.toFixed(3),
+              sheddings: devShed,
+              organics,
+            }
+          }
+          if (name === 'habitats' || name === 'rescale') {
+            // Clear everything (and for 'rescale', grow through three world rescales first), then
+            // let the world repopulate: every newcomer must appear out of view, in its habitat.
+            if (name === 'rescale') {
+              for (let k = 0; k < 3; k++) {
+                player.grow(player.biomass * 1.2)
+                run(1.5)
+              }
+            }
+            for (const c of others()) c.gone = true
+            const since = spawnLog.length
+            run(30)
+            const r = spawnsOk(since)
+            return { pass: r.outOfView && r.inHabitat && r.spawned >= 8, scale: scale.biomass.toFixed(1), ...r }
+          }
+          if (name === 'armor') {
+            // A hunter lands on a scavenger: the plates must crack and repel it, then reseal.
+            const s = others().find(c => c.species === 'scavenger')
+            const h = others().find(c => c.species === 'engulfer')
+            if (!s || !h) return { pass: false, reason: 'need a scavenger and a hunter' }
+            s.armor = 1
+            s.shielded = 0
+            const dx = wrapDelta(s.cx - h.cx, WORLD)
+            const dy = wrapDelta(s.cy - h.cy, WORLD)
+            for (const p of h.pts) {
+              p.x += dx
+              p.y += dy
+            }
+            let repelled = false
+            for (let i = 0; i < 60 && !repelled && !s.engulfedBy; i++) {
+              simulate(STEP)
+              repelled = s.armor < 0.1 && !s.gone
+            }
+            const swallowed = !!s.engulfedBy || s.gone
+            run(21)
+            return {
+              pass: repelled && !swallowed && s.armor >= 1,
+              repelled,
+              swallowed,
+              armorAfter21s: s.armor.toFixed(2),
+            }
+          }
+          // 'transition': spawns during the colony minute must still be out of view and in habitat.
+          for (const t of availableTraits(player.traits, player.mutations).slice(0, 4)) player.addTrait(t.id)
+          evolutions = Math.max(evolutions, 4)
+          player.grow(Math.max(0, 16 - player.biomass))
+          run(0.5)
+          confirming = true
+          beginTransition()
+          const since = spawnLog.length
+          run(25)
+          const r = spawnsOk(since)
+          return { pass: phase === 'colony' && r.outOfView && r.inHabitat, phase, colony: colony.length, ...r }
+        } finally {
+          devGod = false
+          updateFocus()
+          render()
+        }
+      },
+      /** Bring one of each species into a ring around the player (for side-by-side screenshots). */
+      gather() {
+        const species: Species[] = ['grazer', 'engulfer', 'producer', 'scavenger', 'filter']
+        species.forEach((sp, i) => {
+          const c = cells.find(cell => cell.species === sp && cell !== player)
+          if (!c) return
+          const a = (i / species.length) * TAU - Math.PI / 2
+          const d = player.R * 4 + c.R * 2
+          const dx = wrapDelta(player.cx + Math.cos(a) * d - c.cx, WORLD)
+          const dy = wrapDelta(player.cy + Math.sin(a) * d - c.cy, WORLD)
+          for (const p of [...c.pts, ...c.inner, ...c.digesting]) {
+            p.x += dx
+            p.y += dy
+          }
+          if (c.anchored) {
+            c.anchorX += dx
+            c.anchorY += dy
+          }
+          c.cx += dx
+          c.cy += dy
+          if (c.brain) c.brain.rest = 30
+        })
+      },
+      /** All saved runs with telemetry, as JSON. */
+      exportRuns() {
+        return JSON.stringify(save.runs, null, 2)
+      },
+      /** Telemetry for the run in progress. */
+      get stats() {
+        return stats
+      },
+      /** Run the simulation forward synchronously (for tests in throttled background tabs). */
+      advance(seconds: number) {
+        for (let i = 0; i < Math.round(seconds / STEP); i++) simulate(STEP)
+        updateFocus()
+        view.x = focus.x
+        view.y = focus.y
+        view.zoom = targetZoom()
+        render()
+      },
+      /** Teleport the player into the first zone of a type, or beside the first cell of a species. */
+      goto(type: Zone['type'] | Species) {
+        const target = zones.find(zone => zone.type === type) ?? cells.find(c => c.species === type && c !== player)
+        if (!target) return
+        const z = 'type' in target ? target : { x: target.cx - target.R * 3, y: target.cy }
         const dx = z.x - player.cx
         const dy = z.y - player.cy
         for (const p of player.pts) {

@@ -31,8 +31,12 @@ export const tuning = {
   flagellumTurn: 240,
   // Feeding
   capture: 260,
-  // Ecosystem
-  grazers: 9,
+  // Ecosystem: the population by role (four protocells, two light colonies, two armored
+  // scavengers, one filter feeder, two hunters).
+  grazers: 4,
+  producers: 2,
+  scavengers: 2,
+  filters: 1,
   engulfers: 2,
   engulferSense: 200,
   engulferStamina: 6,

@@ -1,4 +1,17 @@
 import type { Brain } from './ai'
+import {
+  DETAIL_MIN_PX,
+  PLANS,
+  type BodyPlan,
+  type ShapeSeed,
+  drawFold,
+  drawFringe,
+  drawLightPlate,
+  drawPlates,
+  drawStalk,
+  drawTraitMarks,
+  newShapeSeed,
+} from './anatomy'
 import { EAT_RATIO, MASS_EXPONENT, WORLD, tuning } from './config'
 import { Flagellum } from './flagellum'
 import type { Fluid } from './fluid'
@@ -61,10 +74,15 @@ const POINTS = 28
 const CHLOROPLAST_RGB = '120,230,110'
 /** The membrane point at the back of the rest shape (rest angle π), where a tail attaches. */
 const REAR = POINTS / 2
+/** How strongly a directional body's turning resists its existing spin. */
+const ANGULAR_DAMP = 1.5
 /** Seconds an engulfed cell takes to be drawn in and dissolved. */
 const ENGULF_TIME = 0.5
 
-export type Species = 'player' | 'grazer' | 'engulfer' | 'offspring'
+export type Species = 'player' | 'grazer' | 'engulfer' | 'offspring' | 'producer' | 'scavenger' | 'filter'
+
+/** A hunter's lunge, as the body shows it: coil (the warning), lunge, then a slack recovery. */
+export type Pose = 'idle' | 'coil' | 'lunge' | 'recover'
 
 /** Colours as "r,g,b" strings so alpha can be set per use. */
 interface Palette {
@@ -102,6 +120,33 @@ const PALETTES: Record<Species, Palette> = {
     aura: null,
     inner: ['255,214,170', '200,240,255'],
   },
+  // Light colony: green, with light-catching plates in its lobes.
+  producer: {
+    rim: '165,235,135',
+    glow: '120,210,100',
+    highlight: '215,250,195',
+    body: '80,170,80',
+    aura: null,
+    inner: [],
+  },
+  // Armored scavenger: warm and dull, plated.
+  scavenger: {
+    rim: '235,200,145',
+    glow: '210,170,110',
+    highlight: '250,232,195',
+    body: '170,130,80',
+    aura: null,
+    inner: ['255,220,170', '230,200,160'],
+  },
+  // Anchored filter feeder: cool and pale.
+  filter: {
+    rim: '175,215,240',
+    glow: '130,190,220',
+    highlight: '215,238,250',
+    body: '90,150,190',
+    aura: null,
+    inner: ['200,230,255'],
+  },
   engulfer: {
     rim: '255,160,195',
     glow: '240,110,160',
@@ -113,7 +158,15 @@ const PALETTES: Record<Species, Palette> = {
 }
 
 /** Thrust multiplier per species; engulfers are big and lazy. */
-const THRUST_SCALE: Record<Species, number> = { player: 1, grazer: 0.85, engulfer: 0.8, offspring: 0.85 }
+const THRUST_SCALE: Record<Species, number> = {
+  player: 1,
+  grazer: 0.85,
+  engulfer: 0.8,
+  offspring: 0.85,
+  producer: 0.35,
+  scavenger: 0.75,
+  filter: 0,
+}
 export const NUTRIENT_RGB: Record<Kind, string> = {
   organic: '170,255,160',
   lipid: '255,200,110',
@@ -182,6 +235,44 @@ export class Protocell {
   hazardRgb = '255,140,70'
   /** Seconds alive, for idle animation. */
   private age = 0
+  readonly plan: BodyPlan
+  private readonly shapeSeed: ShapeSeed
+  /** Rest radius multiplier per membrane point (the species' silhouette). */
+  private readonly restScale = new Float32Array(POINTS)
+  /** Where a directional body wants to face this step (set by AI or main); cleared after each sim step. */
+  private aimX = 0
+  private aimY = 0
+  private aimSet = false
+  pose: Pose = 'idle'
+  /** 0..1 how far into the current pose's look the body is. */
+  private poseAmt = 0
+  /** A hunter's tail: drawn and animated, but it never adds thrust. */
+  private readonly decorTail: Flagellum | null = null
+  /** Visual lean toward something it's about to eat (no effect on reach). */
+  leanDirX = 0
+  leanDirY = 0
+  leanWant = 0
+  private lean = 0
+  /** Anchored species (filter feeder): the stalk's base on the rock (NaN = free), and the outward direction. */
+  anchorX = NaN
+  anchorY = NaN
+  anchorOutX = 0
+  anchorOutY = 0
+  /** Seconds left of a filter feeder's contraction after being bumped. */
+  contract = 0
+  /** Photosynthetic growth stops here (producers are capped). */
+  growthCap = Infinity
+  /** Biomass at spawn, for roles whose behaviour is relative to it. */
+  baseBiomass: number
+  /** A role's own countdown (a light colony's next shedding). */
+  roleTimer = 0
+  /** Draw auras and photosynthesis glow (off for small previews, where they'd be clipped). */
+  glows = true
+  /** Seconds of emphasis on a newly evolved feature (drawn bolder, then settles). */
+  emphasis = 0
+  /** Smoothed direction a player-style body shows its feeding fold. */
+  private foldX = 1
+  private foldY = 0
   /** Direction of the last applied thrust, and where it pushes on the water. */
   steerX = 0
   steerY = 0
@@ -199,6 +290,7 @@ export class Protocell {
   private readonly nx = new Float32Array(POINTS)
   private readonly ny = new Float32Array(POINTS)
   private readonly weight = new Float32Array(POINTS)
+  private readonly goal = new Float32Array(POINTS)
   private readonly sx = new Float32Array(POINTS)
   private readonly sy = new Float32Array(POINTS)
   private readonly aura: HTMLCanvasElement | null
@@ -209,16 +301,25 @@ export class Protocell {
   constructor(x: number, y: number, biomass: number, species: Species) {
     this.species = species
     this.palette = PALETTES[species]
+    this.plan = PLANS[species]
+    this.shapeSeed = newShapeSeed()
+    if (species === 'engulfer') {
+      this.decorTail = new Flagellum()
+      this.decorTail.growth = 1
+    }
     this.aura = this.palette.aura ? glowSprite(...this.palette.aura) : null
     this.biomass = biomass
+    this.baseBiomass = biomass
     const r = (this.R = this.targetR = radiusFor(biomass))
     for (let i = 0; i < POINTS; i++) {
       const a = (i / POINTS) * TAU
       this.restX[i] = Math.cos(a)
       this.restY[i] = Math.sin(a)
-      this.pts.push({ x: x + this.restX[i] * r, y: y + this.restY[i] * r, vx: 0, vy: 0 })
+      this.restScale[i] = this.plan.profile(a, this.shapeSeed)
+      const k = r * this.restScale[i]
+      this.pts.push({ x: x + this.restX[i] * k, y: y + this.restY[i] * k, vx: 0, vy: 0 })
     }
-    const innerCount = species === 'engulfer' ? 5 : species === 'grazer' ? 2 : 3
+    const innerCount = this.plan.inner
     for (let i = 0; i < innerCount; i++) {
       const rgb = this.palette.inner[i % this.palette.inner.length]
       this.inner.push({
@@ -226,7 +327,7 @@ export class Protocell {
         y: y + rand(-0.3, 0.3) * r,
         vx: 0,
         vy: 0,
-        r: species === 'engulfer' ? rand(0.1, 0.15) : rand(0.14, 0.19),
+        r: species === 'engulfer' ? rand(0.1, 0.15) : species === 'grazer' ? rand(0.08, 0.12) : rand(0.14, 0.19),
         rgb,
         life: Infinity,
         maxLife: Infinity,
@@ -267,6 +368,36 @@ export class Protocell {
       }
     }
     this.flash = 1
+  }
+
+  /** Turn the whole body (and its tail) so its front faces (x, y): used when placing a new cell. */
+  orient(x: number, y: number) {
+    const a = Math.atan2(y, x) - Math.atan2(this.facingY, this.facingX)
+    const c = Math.cos(a)
+    const sn = Math.sin(a)
+    for (const p of [...this.pts, ...this.inner]) {
+      const dx = p.x - this.cx
+      const dy = p.y - this.cy
+      p.x = this.cx + dx * c - dy * sn
+      p.y = this.cy + dx * sn + dy * c
+    }
+    this.facingX = Math.cos(Math.atan2(y, x))
+    this.facingY = Math.sin(Math.atan2(y, x))
+  }
+
+  /** Ask a directional body to face this way this step (unit vector). */
+  aim(x: number, y: number) {
+    this.aimX = x
+    this.aimY = y
+    this.aimSet = true
+  }
+
+  clearAim() {
+    this.aimSet = false
+  }
+
+  get anchored() {
+    return !Number.isNaN(this.anchorX)
   }
 
   /** Burst jet: one hard snap of the tail along the body's facing. Returns false while recovering. */
@@ -371,7 +502,12 @@ export class Protocell {
       this.poison = Math.max(0, this.poison - dt)
       this.grow(-this.biomass * 0.03 * dt)
     }
-    if (this.traits.has('photosynthesis') && !eater) {
+    this.contract = Math.max(0, this.contract - dt)
+    this.emphasis = Math.max(0, this.emphasis - dt / 1.6)
+    this.lean += (this.leanWant - this.lean) * Math.min(1, dt * 6)
+    const poseTarget = this.pose === 'idle' ? 0 : 1
+    this.poseAmt += (poseTarget - this.poseAmt) * Math.min(1, dt * 8)
+    if (this.traits.has('photosynthesis') && !eater && this.biomass < this.growthCap) {
       // Light becomes biomass; it works best when the cell is still.
       const still = mag < 0.1 ? PHOTO_STILL_BONUS : 1
       this.grow(scale.biomass * PHOTO_RATE * still * this.envLight * dt)
@@ -442,6 +578,29 @@ export class Protocell {
       tx = tx * 0.3 + fx * push
       ty = ty * 0.3 + fy * push
     }
+    // Directional bodies (hunters, scavengers, filter feeders) swing round to face their aim.
+    // The torque also resists the body's current spin: without that, a body chasing a moving aim
+    // keeps rotating, and a spinning teardrop in front-weighted drag swims like a propeller.
+    if (this.plan.directional && !tail) {
+      const want = this.aimSet ? 1 : mag > 0.05 ? mag : 0
+      let spin = 0
+      let inertia = 0
+      for (let i = 0; i < POINTS; i++) {
+        const rx = pts[i].x - cx
+        const ry = pts[i].y - cy
+        spin += rx * (pts[i].vy - cvy) - ry * (pts[i].vx - cvx)
+        inertia += rx * rx + ry * ry
+      }
+      const omega = inertia > 0 ? spin / inertia : 0
+      let wantTurn = 0
+      if (want > 0) {
+        const ax = this.aimSet ? this.aimX : ix
+        const ay = this.aimSet ? this.aimY : iy
+        const err = Math.atan2(cos * ay - sin * ax, cos * ax + sin * ay)
+        wantTurn = this.plan.turn * clamp(err * 1.5, -1, 1) * want
+      }
+      turn += wantTurn - ANGULAR_DAMP * omega * R
+    }
     const thrust = Math.hypot(tx, ty)
     this.thrust = thrust
     const dirX = thrust > 0 ? tx / thrust : 0
@@ -457,11 +616,30 @@ export class Protocell {
       wsum += weight[i]
     }
 
+    // Target shape: each point's radius (species silhouette, breathing, bulges), then recentred so the
+    // target's average sits on the cell's centre. A lopsided target that isn't recentred (a teardrop,
+    // a bean, a pseudopod) would drag the body toward its bulge forever: perpetual motion.
+    const { goal } = this
+    let offX = 0
+    let offY = 0
     for (let i = 0; i < POINTS; i++) {
-      const p = pts[i]
-      // Hypermetabolism breathes fast and shallow.
-      const pace = muts.has('hypermetabolism') ? 2.6 : 1
-      let shape = 1 + 0.03 * Math.sin(time * 1.7 * pace + i * 0.9) + 0.015 * Math.sin(time * 3.1 * pace - i * 2.3)
+      // Hypermetabolism breathes fast and shallow; each species has its own squirm.
+      const plan = this.plan
+      const pace = (muts.has('hypermetabolism') ? 2.6 : 1) * plan.squirmRate
+      const ph = this.shapeSeed.p1
+      let shape =
+        this.restScale[i] *
+        (1 +
+          plan.squirm *
+            (0.03 * Math.sin(time * 1.7 * pace + i * 0.9 + ph) + 0.015 * Math.sin(time * 3.1 * pace - i * 2.3)))
+      const along = Math.abs(restX[i])
+      // A hunter coiling to strike shortens along its body; a bumped filter feeder pulls in.
+      if (this.pose === 'coil') shape *= 1 - 0.16 * this.poseAmt * along * along
+      if (this.contract > 0) shape *= 1 - 0.28 * Math.min(1, this.contract)
+      if (this.lean > 0.01) {
+        const facing = Math.max(0, nx[i] * this.leanDirX + ny[i] * this.leanDirY)
+        shape += 0.25 * this.lean * facing ** 4
+      }
       if (this.bud > 0) {
         // Unstable Mitosis: a daughter swelling out of one side.
         const facing = Math.max(0, nx[i] * this.budDirX + ny[i] * this.budDirY)
@@ -472,8 +650,18 @@ export class Protocell {
         const facing = Math.max(0, nx[i] * this.reachDirX + ny[i] * this.reachDirY)
         shape += PSEUDOPOD_REACH * this.reach * facing ** 4
       }
-      let ax = stiffness * (cx + nx[i] * R * shape - p.x) - damping * (p.vx - cvx)
-      let ay = stiffness * (cy + ny[i] * R * shape - p.y) - damping * (p.vy - cvy)
+      goal[i] = shape
+      offX += nx[i] * R * shape
+      offY += ny[i] * R * shape
+    }
+    offX /= POINTS
+    offY /= POINTS
+
+    for (let i = 0; i < POINTS; i++) {
+      const p = pts[i]
+      const shape = goal[i]
+      let ax = stiffness * (cx + nx[i] * R * shape - offX - p.x) - damping * (p.vx - cvx)
+      let ay = stiffness * (cy + ny[i] * R * shape - offY - p.y) - damping * (p.vy - cvy)
 
       // Drag against the surrounding water, sampled just outside the body so the cell's own wake
       // doesn't count. The side facing the oncoming flow takes most of it, which flattens the front.
@@ -490,6 +678,13 @@ export class Protocell {
       ax += dirX * share + -ny[i] * turn
       ay += dirY * share + nx[i] * turn
 
+      if (this.anchored) {
+        // Held out from the rock at the end of its stalk.
+        const hx = this.anchorX + this.anchorOutX * R * 1.6
+        const hy = this.anchorY + this.anchorOutY * R * 1.6
+        ax += wrapDelta(hx - cx, WORLD) * 8 - cvx * 4
+        ay += wrapDelta(hy - cy, WORLD) * 8 - cvy * 4
+      }
       p.vx += ax * dt
       p.vy += ay * dt
       p.x += p.vx * dt
@@ -507,6 +702,24 @@ export class Protocell {
       this.jetX = this.cx - dirX * this.R * 1.3
       this.jetY = this.cy - dirY * this.R * 1.3
     }
+    if (this.decorTail) {
+      const m = pts[REAR]
+      const coil = this.pose === 'coil'
+      // Coiled = short and thrashing; lunge = full beat; recovery = slack.
+      this.decorTail.size += ((coil ? 0.55 : 1) - this.decorTail.size) * Math.min(1, dt * 6)
+      const effort = coil ? 1.8 : this.pose === 'lunge' ? 1.3 : this.pose === 'recover' ? 0.05 : mag * 0.8
+      this.decorTail.step(dt, fluid, m.x, m.y, nx[REAR], ny[REAR], this.R, effort)
+    }
+    // Where a player-style body shows its feeding fold: the way it's heading (or reaching).
+    const speed = Math.hypot(this.cvx, this.cvy)
+    const wantX = this.reach > 0.2 ? this.reachDirX : speed > 8 ? this.cvx / speed : this.foldX
+    const wantY = this.reach > 0.2 ? this.reachDirY : speed > 8 ? this.cvy / speed : this.foldY
+    const fk = Math.min(1, dt * 4)
+    this.foldX += (wantX - this.foldX) * fk
+    this.foldY += (wantY - this.foldY) * fk
+    const fl = Math.hypot(this.foldX, this.foldY) || 1
+    this.foldX /= fl
+    this.foldY /= fl
     for (const b of this.inner) this.stepBlob(b, dt, time)
     for (let i = this.digesting.length - 1; i >= 0; i--) {
       const b = this.digesting[i]
@@ -591,6 +804,11 @@ export class Protocell {
       b.vy *= k
     }
     this.flagellum?.rescale(this.cx, this.cy, ncx, ncy, k)
+    this.decorTail?.rescale(this.cx, this.cy, ncx, ncy, k)
+    if (this.anchored) {
+      this.anchorX = ox + wrapDelta(this.anchorX - ox, WORLD) * k
+      this.anchorY = oy + wrapDelta(this.anchorY - oy, WORLD) * k
+    }
     this.cx = ncx
     this.cy = ncy
     this.cvx *= k
@@ -627,13 +845,17 @@ export class Protocell {
     }
   }
 
-  draw(ctx: CanvasRenderingContext2D, view: View) {
+  draw(ctx: CanvasRenderingContext2D, view: View, time = 0) {
     const cx = view.sx(this.cx)
     const cy = view.sy(this.cy)
     const R = this.R * view.zoom
-    if (!view.onScreen(cx, cy, R * (this.flagellum ? 3.5 : 2.5))) return
+    const reachOut = this.flagellum || this.decorTail || this.anchored ? 3.5 : 2.5
+    if (!view.onScreen(cx, cy, R * reachOut)) return
     const pal = this.palette
+    const plan = this.plan
     const alpha = this.screenAlpha
+    // Small on screen: draw the silhouette only, no fine detail.
+    const detail = R >= DETAIL_MIN_PX
     ctx.globalAlpha = alpha
     const { sx, sy } = this
     for (let i = 0; i < POINTS; i++) {
@@ -650,10 +872,18 @@ export class Protocell {
     }
     path.closePath()
 
-    // The tail sits behind the body, so it seems to grow out from under the membrane.
-    this.flagellum?.draw(ctx, this.cx, this.cy, cx, cy, view.zoom, this.R, pal.rim)
+    if (this.anchored) {
+      // The stalk runs from the rock to the back of the cup.
+      const ax = cx + wrapDelta(this.anchorX - this.cx, WORLD) * view.zoom
+      const ay = cy + wrapDelta(this.anchorY - this.cy, WORLD) * view.zoom
+      drawStalk(ctx, ax, ay, sx[REAR], sy[REAR], R, pal.rim)
+    }
 
-    if (this.aura) {
+    // Tails sit behind the body, so they seem to grow out from under the membrane.
+    this.flagellum?.draw(ctx, this.cx, this.cy, cx, cy, view.zoom, this.R, pal.rim)
+    this.decorTail?.draw(ctx, this.cx, this.cy, cx, cy, view.zoom, this.R, pal.rim)
+
+    if (this.aura && this.glows) {
       ctx.globalCompositeOperation = 'lighter'
       ctx.globalAlpha = (0.22 + this.flash * 0.15) * alpha * this.glowScale
       ctx.drawImage(this.aura, cx - R * 2.4, cy - R * 2.4, R * 4.8, R * 4.8)
@@ -661,7 +891,7 @@ export class Protocell {
       ctx.globalCompositeOperation = 'source-over'
     }
 
-    if (this.traits.has('photosynthesis')) {
+    if (this.traits.has('photosynthesis') && this.glows) {
       // The giveaway glow that makes photosynthesisers easy to spot.
       Protocell.photoGlow ??= glowSprite(120, 240, 110)
       ctx.globalCompositeOperation = 'lighter'
@@ -669,21 +899,30 @@ export class Protocell {
       const lure = this.traits.has('lure')
       const pulse = lure ? 0.32 + 0.18 * Math.sin(this.age * 2.2) : 0.2 + 0.05 * Math.sin(this.age * 1.3)
       const size = R * (lure ? 7 : 6)
-      ctx.globalAlpha = pulse * alpha * this.glowScale
+      ctx.globalAlpha = pulse * alpha * this.glowScale * (this.species === 'producer' ? 0.5 : 1)
       ctx.drawImage(Protocell.photoGlow, cx - size / 2, cy - size / 2, size, size)
       ctx.globalAlpha = alpha
       ctx.globalCompositeOperation = 'source-over'
     }
 
     const body = ctx.createRadialGradient(cx - R * 0.35, cy - R * 0.4, R * 0.05, cx, cy, R * 1.05)
-    body.addColorStop(0, `rgba(${pal.highlight},0.20)`)
-    body.addColorStop(0.6, `rgba(${pal.body},0.10)`)
-    body.addColorStop(1, `rgba(${pal.body},0.30)`)
+    body.addColorStop(0, `rgba(${pal.highlight},${0.2 * plan.fill})`)
+    body.addColorStop(0.6, `rgba(${pal.body},${0.1 * plan.fill})`)
+    body.addColorStop(1, `rgba(${pal.body},${0.3 * plan.fill})`)
     ctx.fillStyle = body
     ctx.fill(path)
 
     ctx.save()
     ctx.clip(path)
+    if (this.species === 'producer' && detail) {
+      // Light-catching plates, one in each lobe.
+      const lobes = this.shapeSeed.lobes
+      const turn = Math.atan2(this.facingY, this.facingX)
+      for (let k = 0; k < lobes; k++) {
+        const a = turn + (TAU * k - this.shapeSeed.p1) / lobes
+        drawLightPlate(ctx, cx + Math.cos(a) * R * 0.5, cy + Math.sin(a) * R * 0.5, R * 0.22, a + Math.PI / 2, 1)
+      }
+    }
     for (const b of this.inner) this.drawBlob(ctx, view.zoom, cx, cy, b, 0.9)
     for (const b of this.digesting) {
       const t = b.life / b.maxLife
@@ -692,27 +931,32 @@ export class Protocell {
     ctx.restore()
 
     const thick = this.traits.has('membrane')
-    const cracked = thick && this.armor < 1
     ctx.lineJoin = 'round'
-    ctx.lineWidth = R * (thick ? 0.32 : 0.2)
+    ctx.lineWidth = R * 0.2 * plan.rim
     ctx.strokeStyle = `rgba(${pal.glow},${0.08 + this.flash * 0.08})`
     ctx.stroke(path)
-    // A cracked thick membrane shows as a broken rim until it reseals.
-    if (cracked) ctx.setLineDash([R * (0.25 + 0.5 * this.armor), R * 0.18 * (1 - this.armor) + 1])
-    ctx.lineWidth = Math.max(1.5, R * (thick ? 0.11 : 0.055))
-    ctx.strokeStyle = `rgba(${pal.rim},${(cracked ? 0.45 : 0.6) + this.flash * 0.3})`
+    ctx.lineWidth = Math.max(1, R * 0.055 * plan.rim)
+    ctx.strokeStyle = `rgba(${pal.rim},${plan.rimAlpha + this.flash * 0.3})`
     ctx.stroke(path)
-    ctx.setLineDash([])
-    if (thick) {
-      // Inner layer of the membrane.
-      ctx.save()
-      ctx.translate(cx, cy)
-      ctx.scale(0.84, 0.84)
-      ctx.translate(-cx, -cy)
-      ctx.lineWidth = Math.max(1, R * 0.04) / 0.84
-      ctx.strokeStyle = `rgba(${pal.rim},${0.3 * this.armor + 0.1})`
-      ctx.stroke(path)
-      ctx.restore()
+    // Thick membrane: broad plates that crack apart when they stop an engulf, and close as they reseal.
+    if (thick) drawPlates(ctx, sx, sy, cx, cy, R, this.armor, pal.rim, this.species === 'scavenger' ? 3 : 4)
+    if (detail && this.species !== 'producer') {
+      const fx = this.plan.directional || this.flagellum ? this.facingX : this.foldX
+      const fy = this.plan.directional || this.flagellum ? this.facingY : this.foldY
+      drawTraitMarks(ctx, this.traits, sx, sy, cx, cy, R, fx, fy, path, time, this.emphasis)
+    }
+
+    if (detail && (this.species === 'engulfer' || this.traits.has('engulfing'))) {
+      // A forward feeding fold, opening wider as it coils to strike or reaches for prey.
+      const directional = this.species === 'engulfer'
+      const fx = directional ? this.facingX : this.foldX
+      const fy = directional ? this.facingY : this.foldY
+      const open = this.pose === 'coil' ? 1 : Math.max(this.reach, this.lean)
+      drawFold(ctx, cx, cy, R, fx, fy, pal.rim, open)
+    }
+    if (detail && this.species === 'filter') {
+      const open = 1 - Math.min(1, this.contract)
+      drawFringe(ctx, sx, sy, cx, cy, R, this.facingX, this.facingY, time, open, pal.rim)
     }
 
     if (this.traits.has('spikes')) {
@@ -729,7 +973,10 @@ export class Protocell {
         ctx.lineTo(sx[i] + nx * R * 0.24, sy[i] + ny * R * 0.24)
         ctx.lineTo(sx[i] + ny * w, sy[i] - nx * w)
       }
-      if (this.mutations.has('hollowSpines')) {
+      if (this.traits.has('venom')) {
+        ctx.fillStyle = 'rgba(190,110,255,0.9)'
+        ctx.fill()
+      } else if (this.mutations.has('hollowSpines')) {
         ctx.lineWidth = Math.max(1, R * 0.03)
         ctx.strokeStyle = `rgba(${pal.rim},0.9)`
         ctx.stroke()
@@ -761,6 +1008,13 @@ export class Protocell {
       ctx.stroke(path)
     }
 
+    if (this.emphasis > 0) {
+      // A fresh adaptation: the body glows for a moment so the new feature catches the eye.
+      ctx.lineWidth = R * 0.22
+      ctx.strokeStyle = `rgba(255,255,255,${0.35 * this.emphasis})`
+      ctx.stroke(path)
+    }
+
     // Specular highlight.
     ctx.beginPath()
     ctx.arc(cx - R * 0.08, cy - R * 0.08, R * 0.7, Math.PI * 1.08, Math.PI * 1.42)
@@ -785,6 +1039,11 @@ export class Protocell {
     if (r < 0.3) return
     const x = cx + (b.x - this.cx) * zoom
     const y = cy + (b.y - this.cy) * zoom
+    if (b.rgb === CHLOROPLAST_RGB) {
+      // Photosynthesis: flat light-catching plates rather than round specks.
+      drawLightPlate(ctx, x, y, r * 1.4, b.seed, alpha)
+      return
+    }
     const g = ctx.createRadialGradient(x, y, 0, x, y, r)
     g.addColorStop(0, `rgba(${b.rgb},${alpha})`)
     g.addColorStop(0.6, `rgba(${b.rgb},${alpha * 0.6})`)
@@ -870,5 +1129,10 @@ export class Protocell {
     this.cx += shiftX
     this.cy += shiftY
     this.flagellum?.shift(shiftX, shiftY)
+    this.decorTail?.shift(shiftX, shiftY)
+    if (this.anchored) {
+      this.anchorX += shiftX
+      this.anchorY += shiftY
+    }
   }
 }
