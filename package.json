@@ -15,7 +15,8 @@
     "scale": "tsx scripts/scale.mts",
     "traits": "tsx scripts/traits.mts",
     "lineage": "tsx scripts/lineage.mts",
-    "mutations": "tsx scripts/mutations.mts"
+    "mutations": "tsx scripts/mutations.mts",
+    "biomes": "tsx scripts/biomes.mts"
   },
   "devDependencies": {
     "prettier": "^3.9.9",

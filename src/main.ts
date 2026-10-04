@@ -1,6 +1,18 @@
 import GUI from 'lil-gui'
 import { type Steer, newBrain, think } from './ai'
 import { Sound, haptic } from './audio'
+import {
+  UV_MUTAGEN,
+  ZONES,
+  type Zone,
+  applyHazards,
+  drawDarkness,
+  drawZoneLabels,
+  drawZones,
+  hostileAhead,
+  placeZones,
+  rescaleZones,
+} from './biomes'
 import { WORLD, tuning } from './config'
 import { Dust } from './dust'
 import { Effects } from './effects'
@@ -86,6 +98,8 @@ let player: Protocell
 let cells: Protocell[]
 let nutrients: Nutrients
 let vents: Vent[]
+let zones: Zone[]
+let zoneFoodTimer = 0
 let dust: Dust
 let effects: Effects
 let senses: Senses
@@ -167,6 +181,8 @@ function reset() {
   fluid = new Fluid()
   vents = placeVents()
   player = new Protocell(WORLD / 2, WORLD / 2, 1, 'player')
+  zones = placeZones(vents, player.cx, player.cy)
+  zoneFoodTimer = 0
   cells = [player]
   nutrients = new Nutrients()
   nutrients.seed(player.cx, player.cy, vents)
@@ -264,6 +280,7 @@ function simulate(dt: number) {
   time += dt
   const alive = deathTime === null
   const living = alive && phase === 'living'
+  if (!living) hazardWarning = null
   if (living) aimPseudopod(player, dt)
   if (input.takeDash() && alive && !choosing && !confirming) {
     for (const c of phase === 'living' ? [player] : phase === 'colony' ? colony : []) {
@@ -294,6 +311,24 @@ function simulate(dt: number) {
       if (phase === 'colony' && !cell.engulfedBy) ({ x: sx, y: sy, mag } = flock(cell, colonySteer))
     } else if (!cell.engulfedBy) {
       ;({ x: sx, y: sy, mag } = think(cell, dt, cells, nutrients, npcSteer))
+      // Other cells steer clear of zones that would hurt them.
+      const away = hostileAhead(cell, zones, sx, sy)
+      if (away) {
+        const ax = sx * mag * 0.25 + away[0]
+        const ay = sy * mag * 0.25 + away[1]
+        const len = Math.hypot(ax, ay) || 1
+        sx = ax / len
+        sy = ay / len
+        mag = Math.max(mag, 0.75)
+      }
+    }
+    if (!cell.engulfedBy) {
+      const exposure = applyHazards(cell, zones, dt)
+      if (cell === player && phase === 'living') {
+        if (exposure.light > 0) addMutagen(UV_MUTAGEN * exposure.light * dt)
+        if (exposure.burn > 0) sound.sizzle(exposure.burn * 20)
+        hazardWarning = exposure.worst
+      }
     }
     for (let i = 0; i < SUBSTEPS; i++) cell.step(dt / SUBSTEPS, fluid, sx, sy, mag, time, vents)
 
@@ -322,8 +357,10 @@ function simulate(dt: number) {
   if (alive) advanceTransition(dt)
   if (living) mutationEffects(dt)
   if (living) peakBiomass = Math.max(peakBiomass, player.biomass)
+  stockZones(dt)
   if (living && needsRescale(player)) {
     const k = rescaleWorld(player, cells, nutrients, vents, fluid, effects)
+    rescaleZones(zones, player.cx, player.cy, k)
     // Everything just shrank by k around the player; zoom in by the same amount so the screen doesn't change.
     view.zoom /= k
     view.x = wrapCoord(player.cx + wrapDelta(view.x - player.cx, WORLD) * k, WORLD)
@@ -332,6 +369,30 @@ function simulate(dt: number) {
   dust.step(dt, fluid)
   effects.step(dt)
   if (alive) maintainPopulation(dt)
+}
+
+/** Each hostile zone keeps a stock of the food that makes it worth braving. */
+function stockZones(dt: number) {
+  zoneFoodTimer -= dt
+  if (zoneFoodTimer > 0) return
+  zoneFoodTimer = 2.5
+  const inside = (z: Zone): [number, number] => {
+    const a = rand(0, TAU)
+    const d = Math.sqrt(Math.random()) * z.r * 0.75
+    return [z.x + Math.cos(a) * d, z.y + Math.sin(a) * d]
+  }
+  for (const z of zones) {
+    if (z.type === 'thermal') {
+      if (nutrients.near(z.x, z.y, z.r, 'mineral') < 12)
+        for (let i = 0; i < 3; i++) nutrients.spawn('mineral', ...inside(z))
+      if (nutrients.near(z.x, z.y, z.r, 'lipid') < 10)
+        for (let i = 0; i < 2; i++) nutrients.spawn('lipid', ...inside(z))
+    } else if (z.type === 'acid') {
+      if (nutrients.near(z.x, z.y, z.r, 'organic') < 60) nutrients.cloud(...inside(z))
+    } else if (z.type === 'dark') {
+      if (nutrients.near(z.x, z.y, z.r, 'lipid') < 12) nutrients.lipidCluster(...inside(z))
+    }
+  }
 }
 
 /** Cell-vs-cell: swallow anything small enough, otherwise bump membranes. */
@@ -493,6 +554,8 @@ function repel(eater: Protocell, prey: Protocell) {
 
 /** Engulfing: point the pseudopod at the nearest cell the player could swallow. */
 let tendrilTarget: Protocell | null = null
+/** The hazard currently hurting the player, for the warning line. */
+let hazardWarning: Zone['type'] | null = null
 
 function aimPseudopod(cell: Protocell, dt: number) {
   tendrilTarget = null
@@ -1140,6 +1203,18 @@ const svg = (body: string) =>
   `<svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">${body}</svg>`
 
 const TRAIT_ICONS: Record<TraitId, string> = {
+  thermophile: svg(
+    '<circle cx="32" cy="38" r="12"/><path d="M22 20c0-5 4-5 4-10M32 18c0-5 4-5 4-10M42 20c0-5 4-5 4-10" stroke-width="2"/>',
+  ),
+  acidResistance: svg(
+    '<circle cx="32" cy="32" r="16"/><circle cx="32" cy="32" r="11" stroke-width="1.5"/><circle cx="14" cy="50" r="3"/><circle cx="50" cy="14" r="2.5"/><circle cx="52" cy="48" r="2"/>',
+  ),
+  pigment: svg(
+    '<circle cx="32" cy="34" r="13"/><path d="M32 34m-7 0a7 7 0 1 0 14 0a7 7 0 1 0-14 0" fill="currentColor" opacity="0.5"/><path d="M14 8l8 10M30 6l3 10M48 8l-6 10" stroke-width="2"/>',
+  ),
+  mechanoreception: svg(
+    '<circle cx="22" cy="32" r="9"/><path d="M36 22c5 6 5 14 0 20M44 16c8 9 8 23 0 32" stroke-width="2"/><circle cx="56" cy="32" r="3"/>',
+  ),
   sealed: svg('<circle cx="32" cy="32" r="16"/><path d="M24 32l6 6 11-13"/>'),
   toxic: svg(
     '<circle cx="24" cy="30" r="12"/><circle cx="44" cy="40" r="3"/><circle cx="52" cy="46" r="2.2"/><circle cx="40" cy="50" r="2"/>' +
@@ -1234,6 +1309,7 @@ function render() {
   ctx.fillRect(0, 0, view.w, view.h)
   dust.draw(ctx, view)
   if (tuning.showFlow) fluid.drawFlow(ctx, view)
+  drawZones(ctx, view, zones, time)
   for (const vent of vents) vent.draw(ctx, view, time)
   nutrients.draw(ctx, view, time)
   // Cells being swallowed draw on top of whatever is swallowing them; the player draws above its peers.
@@ -1244,6 +1320,17 @@ function render() {
   for (const cell of cells) if (cell.engulfedBy) cell.draw(ctx, view)
   drawTendril()
   effects.draw(ctx, view)
+  let dark = 0
+  for (const z of zones) if (z.type === 'dark') dark = Math.max(dark, z.strengthAt(focus.x, focus.y))
+  drawDarkness(
+    ctx,
+    view,
+    zones,
+    { x: focus.x, y: focus.y, r: focus.r, dark, mechano: player.traits.has('mechanoreception') },
+    cells,
+    time,
+  )
+  drawZoneLabels(ctx, view, zones, player.traits, focus.x, focus.y)
   ctx.fillStyle = vignette
   ctx.fillRect(0, 0, view.w, view.h)
   if (deathTime === null && player.traits.has('chemoreception')) senses.draw(ctx, view, time)
@@ -1277,6 +1364,7 @@ const hud = {
   lineageStats: document.querySelector<HTMLElement>('#lineage .stats')!,
   lineageDiscovered: document.querySelector<HTMLElement>('#lineage .discovered')!,
   goal: document.querySelector<HTMLElement>('#goal b')!,
+  hazard: document.querySelector<HTMLElement>('#hazard')!,
   sound: document.querySelector<HTMLButtonElement>('#sound')!,
   mutations: document.querySelector<HTMLElement>('#mutations')!,
   mutation: document.querySelector<HTMLElement>('#mutation')!,
@@ -1409,6 +1497,12 @@ function frame(now: number) {
   updateCamera(elapsed)
   render()
   sound.update(looming())
+  const warning =
+    hazardWarning && deathTime === null ? `${ZONES[hazardWarning].warning} · ${ZONES[hazardWarning].label}` : ''
+  if (hud.hazard.textContent !== warning) {
+    hud.hazard.textContent = warning
+    hud.hazard.style.color = hazardWarning ? `rgb(${ZONES[hazardWarning].rgb})` : ''
+  }
   hud.transitionBtn.classList.toggle('shown', transitionReady() && !confirming)
 
   if (input.used) hud.hint.classList.add('hidden')
@@ -1463,6 +1557,29 @@ if (import.meta.env.DEV) {
         return colony
       },
       sound,
+      get zones() {
+        return zones
+      },
+      /** Teleport the player into the first zone of a type. */
+      goto(type: Zone['type']) {
+        const z = zones.find(zone => zone.type === type)
+        if (!z) return
+        const dx = z.x - player.cx
+        const dy = z.y - player.cy
+        for (const p of player.pts) {
+          p.x += dx
+          p.y += dy
+        }
+        for (const b of [...player.inner, ...player.digesting]) {
+          b.x += dx
+          b.y += dy
+        }
+        player.flagellum?.shift(dx, dy)
+        player.cx = z.x
+        player.cy = z.y
+        view.x = z.x
+        view.y = z.y
+      },
       get nutrients() {
         return nutrients
       },

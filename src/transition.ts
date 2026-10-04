@@ -27,6 +27,10 @@ const BRANCH: Record<TraitId, Branch> = {
   sealed: 'defense',
   toxic: 'predation',
   venom: 'predation',
+  thermophile: 'defense',
+  acidResistance: 'defense',
+  pigment: 'light',
+  mechanoreception: 'senses',
 }
 
 /** Latin-ish genus (from your first adaptation) and epithet (from your latest). */
@@ -43,6 +47,10 @@ const GENUS: Record<TraitId, string> = {
   sealed: 'Sutura',
   toxic: 'Toxella',
   venom: 'Venenia',
+  thermophile: 'Thermia',
+  acidResistance: 'Acidula',
+  pigment: 'Melania',
+  mechanoreception: 'Tactilia',
 }
 
 const EPITHET: Record<TraitId, string> = {
@@ -58,6 +66,10 @@ const EPITHET: Record<TraitId, string> = {
   sealed: 'obsignatus',
   toxic: 'toxicus',
   venom: 'venenosus',
+  thermophile: 'thermophilus',
+  acidResistance: 'acidophilus',
+  pigment: 'pigmentosus',
+  mechanoreception: 'sentiens',
 }
 
 const FORM: Record<Branch | 'none', string> = {

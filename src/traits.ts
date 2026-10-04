@@ -17,6 +17,10 @@ export type TraitId =
   | 'sealed'
   | 'toxic'
   | 'venom'
+  | 'thermophile'
+  | 'acidResistance'
+  | 'pigment'
+  | 'mechanoreception'
 
 export interface TraitInfo {
   id: TraitId
@@ -117,6 +121,34 @@ export const TRAITS: Record<TraitId, TraitInfo> = {
     detail: 'Spike hits poison their victim: slowed to half speed and wasting away for a few seconds.',
     requires: 'spikes',
     requiresMutation: 'hollowSpines',
+  },
+  // Survival: adaptations that turn hostile regions into territory.
+  thermophile: {
+    id: 'thermophile',
+    name: 'Thermophile',
+    tagline: 'Proteins that hold their shape in boiling water.',
+    detail: 'Thermal fields no longer scald you. Their minerals and lipids are yours, and nothing follows you in.',
+  },
+  acidResistance: {
+    id: 'acidResistance',
+    name: 'Acid Resistance',
+    tagline: 'A membrane that acid can’t eat through.',
+    detail: 'Acid pools stop dissolving you and stop dragging at you. Feed on their rich organic clouds in peace.',
+    requires: 'membrane',
+  },
+  pigment: {
+    id: 'pigment',
+    name: 'UV Pigment',
+    tagline: 'A dark sunscreen in your membrane.',
+    detail: 'Sunlit shallows stop burning you. With photosynthesis, bask there for double growth.',
+    requires: 'photosynthesis',
+  },
+  mechanoreception: {
+    id: 'mechanoreception',
+    name: 'Mechanoreception',
+    tagline: 'Feel the ripples of anything that moves.',
+    detail: 'See farther in the dark, and sense nearby cells as ripples even where there’s no light.',
+    requires: 'chemoreception',
   },
 }
 

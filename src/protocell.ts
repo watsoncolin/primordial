@@ -174,6 +174,12 @@ export class Protocell {
   private budDirY = 0
   /** Venom: seconds of poisoning left (slowed, wasting away). */
   poison = 0
+  /** Set each step by the zone the cell is in (see biomes.ts): water drag and sunlight multipliers. */
+  envDrag = 1
+  envLight = 1
+  /** 0..1 how badly a hazard is hurting the cell right now, and its colour, for the sizzle. */
+  hazard = 0
+  hazardRgb = '255,140,70'
   /** Seconds alive, for idle animation. */
   private age = 0
   /** Direction of the last applied thrust, and where it pushes on the water. */
@@ -368,7 +374,7 @@ export class Protocell {
     if (this.traits.has('photosynthesis') && !eater) {
       // Light becomes biomass; it works best when the cell is still.
       const still = mag < 0.1 ? PHOTO_STILL_BONUS : 1
-      this.grow(scale.biomass * PHOTO_RATE * still * dt)
+      this.grow(scale.biomass * PHOTO_RATE * still * this.envLight * dt)
     }
     const { cx, cy, cvx, cvy, R, pts, restX, restY, nx, ny, weight } = this
 
@@ -407,7 +413,7 @@ export class Protocell {
       (this.poison > 0 ? 0.5 : 1)
     const stiffness = tuning.stiffness * (thick ? MEMBRANE_STIFFNESS : 1)
     const damping = tuning.wobbleDamping * (thick ? 1.3 : 1)
-    const dragScale = (thick ? MEMBRANE_DRAG : 1) * (muts.has('sticky') ? STICKY_DRAG : 1)
+    const dragScale = (thick ? MEMBRANE_DRAG : 1) * (muts.has('sticky') ? STICKY_DRAG : 1) * this.envDrag
     let tx = ix * base * pulse
     let ty = iy * base * pulse
 
@@ -741,6 +747,12 @@ export class Protocell {
         ctx.arc(sx[i] + (sx[i] - cx) * 0.06, sy[i] + (sy[i] - cy) * 0.06, Math.max(0.8, R * 0.035), 0, TAU)
         ctx.fill()
       }
+    }
+    if (this.hazard > 0.02) {
+      // Sizzling at the edges: something in the water is eating the membrane.
+      ctx.lineWidth = R * 0.14
+      ctx.strokeStyle = `rgba(${this.hazardRgb},${this.hazard * (0.35 + 0.3 * Math.sin(this.age * 22))})`
+      ctx.stroke(path)
     }
     if (this.mutations.has('hypermetabolism') || this.poison > 0) {
       // Running hot (orange), or poisoned (violet).

@@ -742,3 +742,17 @@ kbd {
 #generation {
   margin-bottom: 4px;
 }
+
+#hazard {
+  position: fixed;
+  top: calc(34px + env(safe-area-inset-top));
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  pointer-events: none;
+  text-shadow: 0 0 8px rgba(0, 0, 0, 0.8);
+}

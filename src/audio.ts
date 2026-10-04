@@ -114,6 +114,12 @@ export class Sound {
     this.tone('sine', 130, 32, 1.1, 0.35, pan, 0.005)
   }
 
+  /** A hazard eating at the membrane. */
+  sizzle(strength: number) {
+    if (!this.ready('sizzle', 180)) return
+    this.noiseBurst('highpass', 2600, 4200, 0.7, 0.16, 0.05 * clamp(strength, 0, 1), 0)
+  }
+
   colonyLost(pan: number) {
     this.tone('sine', 640, 240, 0.28, 0.09, pan)
   }
