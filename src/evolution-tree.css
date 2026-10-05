@@ -157,3 +157,10 @@
     height: 100px;
   }
 }
+
+@media (max-width: 640px) {
+  #evolution-tree-btn {
+    bottom: calc(58px + env(safe-area-inset-bottom));
+    min-height: 36px;
+  }
+}

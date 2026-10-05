@@ -116,3 +116,10 @@
     font-size: 22px;
   }
 }
+
+@media (max-width: 640px) {
+  #life-guide-btn {
+    bottom: calc(58px + env(safe-area-inset-bottom));
+    min-height: 36px;
+  }
+}

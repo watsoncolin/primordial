@@ -73,6 +73,7 @@ export interface RunStats {
   habitat: Record<string, number>
   /** Colony cells alive when the transition ended (null if it was never attempted). */
   transitionSurvivors: number | null
+  combat?: { strikes: number; venomHits: number; ramHits: number; drainedBiomass: number; raidLunges: number }
 }
 
 export interface Save {

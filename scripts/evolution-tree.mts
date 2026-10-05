@@ -23,10 +23,10 @@ for (const path of Object.values(PATHS)) {
 }
 const armor = new Set<TraitId>(['membrane'])
 assert(availableTraits(armor, new Set()).some(t => t.id === 'spikes'))
-assert(!availableTraits(new Set([...armor, 'spikes']), new Set()).some(t => t.id === 'venom'))
+assert(availableTraits(new Set([...armor, 'spikes']), new Set()).some(t => t.id === 'venom'))
 assert(availableTraits(new Set([...armor, 'spikes']), new Set(['hollowSpines'])).some(t => t.id === 'venom'))
 assert(!availableTraits(new Set(['sealed']), new Set(['porous'])).some(t => t.id === 'toxic'))
 assert(!availableTraits(new Set(['toxic']), new Set(['porous'])).some(t => t.id === 'sealed'))
 console.log(
-  'Passed: 12 reachable branches, developed form names, venom prerequisites, and exclusive mutation branches.',
+  'Passed: 12 reachable branches, developed form names, deliberate venom prerequisites, and exclusive mutation branches.',
 )

@@ -1,3 +1,4 @@
+import { hybridAllowed, type PathId } from './paths'
 import type { MutationId } from './mutations'
 
 /**
@@ -90,7 +91,8 @@ export const TRAITS: Record<TraitId, TraitInfo> = {
     id: 'tendril',
     name: 'Tendril',
     tagline: 'A long, sticky arm of membrane.',
-    detail: 'Reach for prey much farther away and reel it in toward you.',
+    detail:
+      'Reel edible prey in. Press R or latch to drain a larger wounded enemy: you swim slowly while attached. Strong outward movement or six seconds of struggle breaks the tether; press again to release.',
     requires: 'engulfing',
   },
   lure: {
@@ -118,10 +120,10 @@ export const TRAITS: Record<TraitId, TraitInfo> = {
   venom: {
     id: 'venom',
     name: 'Venom Gland',
-    tagline: 'Your hollow spines can inject.',
-    detail: 'Spike hits poison their victim: slowed to half speed and wasting away for a few seconds.',
+    tagline: 'A deliberate close-range venom strike.',
+    detail:
+      'Press F or strike to wind up a frontal venom jab. Poison slows and wastes away larger prey; three seconds to recover. Hollow Spines extends the poison. Repeated hits refresh it rather than stacking.',
     requires: 'spikes',
-    requiresMutation: 'hollowSpines',
   },
   // Survival: adaptations that turn hostile regions into territory.
   thermophile: {
@@ -154,10 +156,11 @@ export const TRAITS: Record<TraitId, TraitInfo> = {
 }
 
 /** Traits a cell could evolve next: not taken yet, prerequisite trait and mutation present. */
-export function availableTraits(has: Set<TraitId>, mutations: Set<MutationId>) {
+export function availableTraits(has: Set<TraitId>, mutations: Set<MutationId>, path: PathId | null = null) {
   return Object.values(TRAITS).filter(
     t =>
       !has.has(t.id) &&
+      hybridAllowed(path, has, t.id) &&
       (!t.requires || has.has(t.requires)) &&
       (!t.requiresMutation || mutations.has(t.requiresMutation)) &&
       // Once the leak is sealed, there's nothing left to weaponise (and vice versa).

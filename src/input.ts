@@ -25,12 +25,15 @@ export class Input {
   /** Steering result from the last read(): unit direction and 0..1 strength. */
   readonly steer = { x: 0, y: 0, mag: 0 }
   used = false
+  private canvas: HTMLCanvasElement
   private pointer: { x: number; y: number } | null = null
   /** The touch joystick: where the thumb landed (base, trailing past STICK_REACH) and where it is now. */
   stick: { id: number; ox: number; oy: number; x: number; y: number } | null = null
   private readonly keys = new Set<string>()
   private lastTap = 0
   private dashQueued = false
+  private strikeQueued = false
+  private latchQueued = false
   /**
    * Sticky ("toggle") movement, for automated playtests: one input keeps you swimming until the
    * next. Arrows/WASD set a direction, Space releases thrust, a click sets a target, Escape cancels,
@@ -43,6 +46,8 @@ export class Input {
   private pendingClick: { x: number; y: number } | null = null
 
   constructor(canvas: HTMLCanvasElement) {
+    this.canvas = canvas
+    canvas.tabIndex = 0
     canvas.addEventListener('pointerdown', e => {
       this.used = true
       if (this.sticky) {
@@ -83,8 +88,18 @@ export class Input {
     canvas.addEventListener('pointerup', lift)
     canvas.addEventListener('pointercancel', lift)
     window.addEventListener('keydown', e => {
-      if (e.target instanceof HTMLInputElement) return
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return
       const key = e.key.toLowerCase()
+      if (!e.repeat && key === 'f') {
+        this.strikeQueued = true
+        e.preventDefault()
+        return
+      }
+      if (!e.repeat && key === 'r') {
+        this.latchQueued = true
+        e.preventDefault()
+        return
+      }
       if (this.sticky) {
         if (key in KEYS) {
           const [x, y] = KEYS[key]
@@ -117,6 +132,10 @@ export class Input {
       this.keys.clear()
       this.pointer = null
       this.stick = null
+      this.stickyDir = null
+      this.pendingClick = null
+      this.stickyCleared = true
+      this.dashQueued = this.strikeQueued = this.latchQueued = false
     })
   }
 
@@ -126,6 +145,11 @@ export class Input {
     this.stick = null
     this.keys.clear()
     this.dashQueued = false
+    this.strikeQueued = this.latchQueued = false
+    this.stickyDir = null
+    this.pendingClick = null
+    this.stickyCleared = true
+    this.canvas.focus({ preventScroll: true })
   }
 
   /** Set when an arrow, Space or Escape should drop any click target (the caller clears it). */
@@ -142,6 +166,23 @@ export class Input {
   queueDash() {
     this.used = true
     this.dashQueued = true
+  }
+
+  queueStrike() {
+    this.strikeQueued = true
+  }
+  queueLatch() {
+    this.latchQueued = true
+  }
+  takeStrike() {
+    const v = this.strikeQueued
+    this.strikeQueued = false
+    return v
+  }
+  takeLatch() {
+    const v = this.latchQueued
+    this.latchQueued = false
+    return v
   }
 
   /** True once per Space press or double-tap. */

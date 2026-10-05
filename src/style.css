@@ -970,3 +970,74 @@ kbd {
     height: 90px;
   }
 }
+
+.combat-button {
+  position: fixed;
+  right: calc(20px + env(safe-area-inset-right));
+  width: 84px;
+  min-height: 48px;
+  color: #f0d9ff;
+  background: #35223f;
+  border: 1px solid #ba8cce;
+  border-radius: 12px;
+  font: 13px system-ui;
+  cursor: pointer;
+  z-index: 10;
+  touch-action: none;
+}
+.combat-button[hidden] {
+  display: none;
+}
+.combat-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+#strike-btn {
+  bottom: calc(152px + env(safe-area-inset-bottom));
+}
+#latch-btn {
+  bottom: calc(210px + env(safe-area-inset-bottom));
+  color: #d7ffee;
+  background: #163c35;
+  border-color: #7ebfa5;
+}
+
+#combat-hint {
+  position: fixed;
+  bottom: calc(64px + env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(500px, 70vw);
+  color: #e3d5eb;
+  background: #14252eee;
+  padding: 8px 12px;
+  border-radius: 8px;
+  text-align: center;
+  z-index: 10;
+  font: 13px/1.4 system-ui;
+  pointer-events: none;
+}
+#combat-hint[hidden] {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  #tree-btn {
+    left: calc(14px + env(safe-area-inset-left));
+    right: auto;
+    min-height: 32px;
+  }
+  #sound {
+    min-height: 32px;
+  }
+  #hint {
+    bottom: calc(104px + env(safe-area-inset-bottom));
+  }
+  #combat-hint {
+    left: 14px;
+    right: 112px;
+    transform: none;
+    max-width: none;
+    bottom: calc(116px + env(safe-area-inset-bottom));
+  }
+}

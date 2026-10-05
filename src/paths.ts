@@ -18,9 +18,9 @@ export const PATHS: Record<PathId, EvolutionPath> = {
     name: 'Pursuer',
     starter: 'flagellum',
     role: 'engulfer',
-    tagline: 'Fast pursuit. Fragile body. Strike and escape.',
+    tagline: 'Fast pursuit. Fragile tissue. Less efficient in light.',
     detail:
-      'Become a narrow, streamlined hunter with a powerful tail. Start with Flagellum: strong forward thrust, but turning takes commitment. Develop Burst Jet and feeding tools to chase prey.',
+      'Become a narrow, streamlined hunter with a powerful tail. Start with Flagellum: strong forward thrust, but turning takes commitment. Develop Burst Jet and feeding tools to chase prey. Wounds hurt more; light growth is weaker.',
     traits: ['burst', 'engulfing', 'tendril', 'chemoreception'],
     color: '255,180,135',
   },
@@ -29,9 +29,9 @@ export const PATHS: Record<PathId, EvolutionPath> = {
     name: 'Bulwark',
     starter: 'membrane',
     role: 'scavenger',
-    tagline: 'Heavy armor. Slow movement. Stand your ground.',
+    tagline: 'Heavy armor. Stronger rams. Slow movement.',
     detail:
-      'Become a broad, plated organism. Start with Thick Membrane: survive one engulfing attempt while your armor holds, but accelerate slowly. Develop Ram Crest and Venom to break larger enemies down.',
+      'Become a broad, plated organism. Start with Thick Membrane: survive one engulfing attempt while your armor holds, but accelerate slowly. Develop Ram Crest and Venom to break larger enemies down. Stronger rams and tougher tissue cost speed.',
     traits: ['spikes', 'venom', 'engulfing', 'acidResistance'],
     color: '155,205,255',
   },
@@ -40,9 +40,9 @@ export const PATHS: Record<PathId, EvolutionPath> = {
     name: 'Trapper',
     starter: 'engulfing',
     role: 'filter',
-    tagline: 'A feeding mouth. Close ambush. Reach and capture.',
+    tagline: 'Efficient feeding. Strong draining tendrils. Slower pursuit.',
     detail:
-      'Become a crescent-shaped body built around a feeding opening. Start with Engulfing: grab larger meals, then slow down while digesting. Develop Tendril and a luminous lure to bring prey to you.',
+      'Become a crescent-shaped body built around a feeding opening. Start with Engulfing: grab larger meals, then slow down while digesting. Develop Tendril and a luminous lure to bring prey to you. Your drain is stronger, but pursuit is slower.',
     traits: ['tendril', 'photosynthesis', 'lure', 'chemoreception'],
     color: '220,165,255',
   },
@@ -51,9 +51,9 @@ export const PATHS: Record<PathId, EvolutionPath> = {
     name: 'Producer',
     starter: 'photosynthesis',
     role: 'producer',
-    tagline: 'Living petals. Grow in light. Manage exposure.',
+    tagline: 'Faster growth in light. Slower swimming and meal growth.',
     detail:
-      'Become a rosette of light-catching chambers. Start with Photosynthesis: grow without hunting, faster while still, but your glow attracts predators. Develop UV Pigment and defenses to protect your garden.',
+      'Become a rosette of light-catching chambers. Start with Photosynthesis: grow without hunting, faster while still, but your glow attracts predators. Develop UV Pigment and defenses to protect your garden. Light growth is stronger; meals yield less.',
     traits: ['pigment', 'membrane', 'thermophile', 'chemoreception'],
     color: '155,255,170',
   },
@@ -134,4 +134,17 @@ export const PATH_BRANCHES: Record<PathId, EvolutionBranch[]> = {
 export function pathForm(path: PathId, traits: Set<TraitId>): string {
   const complete = PATH_BRANCHES[path].filter(b => b.chain.every(t => traits.has(t)))
   return complete.sort((a, b) => b.chain.length - a.chain.length)[0]?.name ?? PATHS[path].name
+}
+
+const BODY_SYSTEMS: TraitId[] = ['flagellum', 'membrane', 'engulfing', 'photosynthesis']
+const NATIVE_SYSTEMS: Record<PathId, TraitId[]> = {
+  pursuer: ['flagellum', 'engulfing'],
+  bulwark: ['membrane', 'engulfing'],
+  trapper: ['engulfing', 'photosynthesis'],
+  producer: ['photosynthesis', 'membrane'],
+}
+/** A lineage supports one foreign body system, making hybrids a commitment. */
+export function hybridAllowed(path: PathId | null, traits: Set<TraitId>, candidate: TraitId) {
+  if (!path || !BODY_SYSTEMS.includes(candidate) || NATIVE_SYSTEMS[path].includes(candidate)) return true
+  return !BODY_SYSTEMS.some(t => traits.has(t) && !NATIVE_SYSTEMS[path].includes(t) && t !== candidate)
 }

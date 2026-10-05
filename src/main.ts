@@ -1,5 +1,8 @@
+import { PATH_BALANCE, MAX_RUN_BIOMASS } from './balance'
+import { DrainTether, canLatch, venomStrike, distance } from './offensive'
+import { raidPopulation, raidStage } from './finale'
 import { EvolutionTree } from './evolution-tree'
-import { PATHS } from './paths'
+import { PATHS, type PathId } from './paths'
 import { ramImpact } from './combat'
 import GUI from 'lil-gui'
 import { type Steer, aiWorld, newBrain, think } from './ai'
@@ -247,6 +250,7 @@ function freshStats(): RunStats {
     eaten: {},
     habitat: {},
     transitionSurvivors: null,
+    combat: { strikes: 0, venomHits: 0, ramHits: 0, drainedBiomass: 0, raidLunges: 0 },
   }
 }
 
@@ -326,6 +330,14 @@ function updateFocus() {
 const npcSteer: Steer = { x: 0, y: 0, mag: 0 }
 
 function reset() {
+  devPractice = false
+  if (tetherOwner) drainTether.release(tetherOwner)
+  tetherOwner = null
+  tendrilTarget = null
+  combatMessageTime = 0
+  pendingLatch = 0
+  drainTether.cooldown = 0
+  raidWave = -1
   scale.biomass = 1
   fluid = new Fluid()
   vents = placeVents()
@@ -395,6 +407,7 @@ function reset() {
 const spawnLog: { species: string; outOfView: boolean; inHabitat: boolean; phase: Phase }[] = []
 /** Dev checks: the player (and colony) can't be eaten, so long simulated checks don't end early. */
 let devGod = false
+let devPractice = false
 /** Dev checks: how many times light colonies have shed food. */
 let devShed = 0
 
@@ -421,7 +434,12 @@ function viewRadius() {
  */
 function spawnCell(species: Exclude<Species, 'player' | 'offspring'>, minDist: number) {
   const [lo, hi] = ROLE_SIZE[species]
-  const ratio = species === 'grazer' ? Math.exp(rand(Math.log(lo), Math.log(hi))) : rand(lo, hi)
+  const ratio =
+    phase === 'colony' && species === 'engulfer'
+      ? rand(4.2, 4.8)
+      : species === 'grazer'
+        ? Math.exp(rand(Math.log(lo), Math.log(hi)))
+        : rand(lo, hi)
   const away = Math.max(minDist, viewRadius())
   let x = 0
   let y = 0
@@ -454,7 +472,10 @@ function spawnCell(species: Exclude<Species, 'player' | 'offspring'>, minDist: n
       if (d > away && clear) break
     }
   }
-  const biomass = player.biomass * ratio
+  const biomass =
+    (phase === 'colony' && species === 'engulfer'
+      ? Math.max(colonyBirthBiomass, ...colony.map(c => c.biomass))
+      : player.biomass) * ratio
   if (anchor) {
     // The cup sits just off the rock on its stalk, opening into the current.
     const r = PROTOCELL_RADIUS * Math.sqrt(biomass / scale.biomass)
@@ -463,6 +484,11 @@ function spawnCell(species: Exclude<Species, 'player' | 'offspring'>, minDist: n
   }
   const cell = new Protocell(x, y, biomass, species)
   cell.brain = newBrain()
+  if (phase === 'colony' && species === 'engulfer') {
+    cell.brain.raid = true
+    cell.brain.lungeCooldown = rand(0.5, 2)
+    cell.brain.chaseTime = rand(0, 2)
+  }
   // Born facing its stalk's direction (filter feeders) or any way at all.
   const heading = rand(0, TAU)
   if (anchor) cell.orient(anchor.ux, anchor.uy)
@@ -511,8 +537,25 @@ function maintainPopulation(dt: number) {
     else spawnCell('grazer', 450)
   }
   // Dividing draws a crowd: extra predators while the colony is vulnerable.
-  const engulfers = tuning.engulfers + (phase === 'colony' ? 2 : 0)
-  if (alive('engulfer') < engulfers) spawnCell('engulfer', phase === 'colony' ? 450 : 600)
+  const engulfers = phase === 'colony' ? raidPopulation(phaseTime) : tuning.engulfers
+  let hunters = alive('engulfer')
+  if (phase === 'colony') {
+    const threats = cells.filter(
+      c => c.species === 'engulfer' && !c.gone && !c.engulfedBy && colony.some(member => c.canEat(member)),
+    )
+    hunters = threats.length
+    // Old, undersized hunters do not count as pressure; replace them only after they leave sight.
+    for (const c of cells)
+      if (
+        c.species === 'engulfer' &&
+        !c.gone &&
+        !c.engulfedBy &&
+        !threats.includes(c) &&
+        outOfView(c.cx, c.cy, focus.x, focus.y, viewRadius())
+      )
+        c.gone = true
+  }
+  if (hunters < engulfers) spawnCell('engulfer', phase === 'colony' ? 450 : 600)
 }
 
 /** Keep the player a constant size on screen; the world shrinks as it grows. */
@@ -540,7 +583,16 @@ function simulate(dt: number) {
   const alive = deathTime === null
   const living = alive && phase === 'living'
   if (!living) hazardWarning = null
-  if (living) aimPseudopod(player, dt)
+  if (living) {
+    aimPseudopod(player, dt)
+  }
+  if (alive && (living || phase === 'colony')) offensiveActions(dt)
+  else {
+    input.takeStrike()
+    input.takeLatch()
+    if (tetherOwner) drainTether.release(tetherOwner)
+    tetherOwner = null
+  }
   if (input.takeDash() && alive && !choosing && !confirming) {
     for (const c of phase === 'living' ? [player] : phase === 'colony' ? colony : []) {
       // The tail's snap throws a slug of water backwards.
@@ -566,7 +618,10 @@ function simulate(dt: number) {
     } else if (cell.colony) {
       if (phase === 'colony' && !cell.engulfedBy) ({ x: sx, y: sy, mag } = flock(cell, colonySteer))
     } else if (!cell.engulfedBy) {
+      const priorPose = cell.pose
       ;({ x: sx, y: sy, mag } = think(cell, dt, cells, nutrients, npcSteer))
+      if (phase === 'colony' && cell.brain?.raid && cell.pose === 'lunge' && priorPose !== 'lunge' && stats.combat)
+        stats.combat.raidLunges++
       // Other cells steer clear of zones that would hurt them.
       const away = hostileAhead(cell, zones, sx, sy)
       if (away) {
@@ -830,10 +885,15 @@ function eat(eater: Protocell, prey: Protocell) {
 /** Spikes: knock a chunk of biomass off `victim`; it sprays out as food. */
 function tear(victim: Protocell, spiky: Protocell, speed: number, ram = false) {
   if (speed < SPIKE_MIN_SPEED || victim.spikeImmune > 0 || victim.engulfedBy) return
+  if (ram && (spiky === player || spiky.colony) && stats.combat) stats.combat.ramHits++
   victim.spikeImmune = SPIKE_RECOVERY
-  const bite = (ram ? 0.24 : SPIKE_BITE) * (spiky.mutations.has('hollowSpines') ? HOLLOW_SPIKE_BITE : 1)
-  const lost = victim.biomass * bite * Math.min(1, speed / SPIKE_FULL_SPEED)
-  if (spiky.traits.has('venom')) victim.poison = VENOM_TIME
+  const bite =
+    (ram ? 0.24 * (spiky.path ? PATH_BALANCE[spiky.path].ram : 1) : SPIKE_BITE) *
+    (spiky.mutations.has('hollowSpines') ? HOLLOW_SPIKE_BITE : 1)
+  const lost =
+    victim.biomass * bite * Math.min(1, speed / SPIKE_FULL_SPEED) * (victim.path ? PATH_BALANCE[victim.path].damage : 1)
+  if (spiky.traits.has('venom'))
+    victim.poison = Math.max(victim.poison, spiky.mutations.has('hollowSpines') ? VENOM_TIME * 1.5 : VENOM_TIME)
   if (victim === player) addMutagen(MUTAGEN_HURT)
   if (victim === player || spiky === player || victim.colony || spiky.colony) {
     sound.tear(panAt(victim.cx))
@@ -872,6 +932,8 @@ function tear(victim: Protocell, spiky: Protocell, speed: number, ram = false) {
   // Getting torn makes a predator back off for a moment.
   if (victim.brain) {
     victim.brain.lunge = 0
+    victim.brain.coil = 0
+    victim.brain.recover = Math.max(victim.brain.recover, 0.5)
     victim.brain.rest = Math.max(victim.brain.rest, 0.5)
     victim.brain.attacker = spiky
     victim.brain.alarm = 6
@@ -918,11 +980,19 @@ function repel(eater: Protocell, prey: Protocell) {
 
 /** Engulfing: point the pseudopod at the nearest cell the player could swallow. */
 let tendrilTarget: Protocell | null = null
+const drainTether = new DrainTether()
+let tetherOwner: Protocell | null = null
+let combatMessage = ''
+let combatMessageTime = 0
+let pendingLatch = 0
+let colonyBirthBiomass = 1
+let raidWave = -1
 /** The hazard currently hurting the player, for the warning line. */
 let hazardWarning: Zone['type'] | null = null
 
 function aimPseudopod(cell: Protocell, dt: number) {
-  tendrilTarget = null
+  tendrilTarget = drainTether.target
+  if (drainTether.target) return
   if (!cell.traits.has('engulfing')) {
     // Without pseudopods, the body still leans toward something it's about to swallow.
     cell.leanWant = 0
@@ -969,19 +1039,82 @@ function aimPseudopod(cell: Protocell, dt: number) {
   }
 }
 
+/** Explicit attacks are short commitments, not automatic damage against everything nearby. */
+function offensiveActions(dt: number) {
+  const actors = (phase === 'colony' ? colony : [player]).filter(c => !c.gone && !c.engulfedBy)
+  const strike = input.takeStrike()
+  const latch = input.takeLatch()
+  combatMessageTime = Math.max(0, combatMessageTime - dt)
+  for (const actor of actors) {
+    if (strike && actor.traits.has('venom') && actor.attackCooldown <= 0) {
+      sound.whoosh(panAt(actor.cx))
+      if (stats.combat) stats.combat.strikes++
+    }
+    const hit = venomStrike(actor, cells, dt, strike)
+    if (hit) {
+      if (stats.combat) stats.combat.venomHits++
+      effects.ripple(hit.cx, hit.cy, '220,155,255', 0.8)
+      sound.tear(panAt(hit.cx))
+      haptic(15)
+    } else if (hit === null) {
+      effects.ripple(actor.cx + actor.facingX * actor.R, actor.cy + actor.facingY * actor.R, '180,110,230', 0.25)
+      combatMessage = 'Strike missed — aim the prow and get closer'
+      combatMessageTime = 1.2
+    }
+  }
+  pendingLatch = Math.max(0, pendingLatch - dt)
+  if (latch && actors.some(a => a.traits.has('tendril'))) {
+    if (drainTether.target && tetherOwner) {
+      drainTether.release(tetherOwner)
+      pendingLatch = 0
+    } else pendingLatch = 0.4
+  }
+  if (pendingLatch > 0) {
+    const pairs = actors
+      .filter(a => a.traits.has('tendril'))
+      .flatMap(a => cells.filter(c => canLatch(a, c)).map(c => ({ actor: a, target: c })))
+    pairs.sort((a, b) => distance(a.actor, a.target) - distance(b.actor, b.target))
+    const pair = pairs[0]
+    if (pair && drainTether.start(pair.actor, pair.target)) {
+      tetherOwner = pair.actor
+      pendingLatch = 0
+      if (pair.target.brain) {
+        pair.target.brain.attacker = pair.actor
+        pair.target.brain.alarm = 6
+      }
+      sound.gulp(panAt(pair.target.cx))
+    } else if (pendingLatch <= dt * 1.1) {
+      combatMessage = drainTether.cooldown > 0 ? 'Tendril recovering' : 'Latch needs a nearby, larger wounded enemy'
+      combatMessageTime = 1.5
+    }
+  }
+  if (tetherOwner) {
+    const attached = !!drainTether.target
+    const drained = drainTether.step(tetherOwner, dt)
+    if (stats.combat) stats.combat.drainedBiomass += drained
+    if (attached && !drainTether.target) {
+      combatMessage = 'Tether released — regroup before latching again'
+      combatMessageTime = 1.2
+    }
+    if (!drainTether.target) tetherOwner = null
+  } else drainTether.cooldown = Math.max(0, drainTether.cooldown - dt)
+  if (drainTether.target) tendrilTarget = drainTether.target
+}
+
 /** The tendril: a wavering strand from the membrane to whatever it's holding. */
 function drawTendril() {
-  const prey = tendrilTarget
-  if (!prey || player.gone) return
+  const owner = tetherOwner ?? player
+  const prey = drainTether.target ?? tendrilTarget
+  if (!prey || owner.gone || prey.gone || prey.engulfedBy) return
   const z = view.zoom
-  const px = view.sx(player.cx)
-  const py = view.sy(player.cy)
-  const dx = wrapDelta(prey.cx - player.cx, WORLD) * z
-  const dy = wrapDelta(prey.cy - player.cy, WORLD) * z
+  const px = view.sx(owner.cx)
+  const py = view.sy(owner.cy)
+  const dx = wrapDelta(prey.cx - owner.cx, WORLD) * z
+  const dy = wrapDelta(prey.cy - owner.cy, WORLD) * z
   const d = Math.hypot(dx, dy) || 1
   const ux = dx / d
   const uy = dy / d
-  const start = player.grabRadius * z * 0.95
+  const start = owner.grabRadius * z * 0.95
   const end = d - prey.R * z * 0.8
   if (end <= start) return
   const sway = Math.sin(time * 6) * (end - start) * 0.12
@@ -991,12 +1124,12 @@ function drawTendril() {
   ctx.moveTo(px + ux * start, py + uy * start)
   ctx.quadraticCurveTo(mx, my, px + ux * end, py + uy * end)
   ctx.lineCap = 'round'
-  ctx.lineWidth = Math.max(1.5, player.R * z * 0.09)
-  ctx.strokeStyle = `rgba(${player.palette.rim},0.55)`
+  ctx.lineWidth = Math.max(1.5, owner.R * z * 0.09)
+  ctx.strokeStyle = `rgba(${owner.palette.rim},0.55)`
   ctx.stroke()
   ctx.beginPath()
-  ctx.arc(px + ux * end, py + uy * end, Math.max(2, player.R * z * 0.1), 0, Math.PI * 2)
-  ctx.fillStyle = `rgba(${player.palette.rim},0.7)`
+  ctx.arc(px + ux * end, py + uy * end, Math.max(2, owner.R * z * 0.1), 0, Math.PI * 2)
+  ctx.fillStyle = `rgba(${owner.palette.rim},0.7)`
   ctx.fill()
 }
 
@@ -1042,7 +1175,7 @@ function rupture(cell: Protocell, eater: Protocell) {
   const seconds = Math.round(time - startTime)
   hud.deathStats.textContent =
     `Survived ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} · ` +
-    `peak biomass ×${peakBiomass.toFixed(2)} · ${cellsEaten} cells absorbed`
+    `peak biomass ×${peakBiomass.toFixed(2)} · ${cellsEaten} cells absorbed${phase === 'colony' ? ` · ${stats.combat?.raidLunges ?? 0} predator lunges` : ''}`
   hud.deathCause.textContent =
     eater.species === 'engulfer' ? 'Engulfed by a predatory protocell' : 'Absorbed by a larger protocell'
   hud.death.classList.add('shown')
@@ -1213,24 +1346,31 @@ function openConfirm() {
   confirming = true
   input.release()
   hud.prompt.classList.add('shown')
+  hud.prompt.querySelector<HTMLButtonElement>('[data-action=begin]')!.focus()
 }
 
 function closeConfirm() {
   confirming = false
   hud.prompt.classList.remove('shown')
+  input.release()
 }
 
 /** Divide the body into a colony of small cells that inherit every adaptation. */
 function beginTransition() {
   closeConfirm()
   if (phase !== 'living' || deathTime !== null) return
+  if (tetherOwner) drainTether.release(tetherOwner)
+  tetherOwner = null
+  tendrilTarget = null
   phase = 'colony'
   phaseTime = 0
+  raidWave = -1
   input.release()
   sound.transitionBegin()
   haptic(80)
   const traits = [...player.traits]
   const each = (player.biomass * COLONY_SHARE) / COLONY_CELLS
+  colonyBirthBiomass = each
   for (let i = 0; i < COLONY_CELLS; i++) {
     const a = (i / COLONY_CELLS) * TAU
     const c = new Protocell(
@@ -1241,6 +1381,7 @@ function beginTransition() {
     )
     if (player.path) c.setPath(player.path)
     c.colony = true
+    c.biomassCeiling = each * 1.6
     for (const t of traits) c.addTrait(t)
     for (const p of c.pts) {
       p.vx = player.cvx + Math.cos(a) * 45
@@ -1266,7 +1407,12 @@ function beginTransition() {
   }
   effects.ripple(player.cx, player.cy, player.palette.rim, 1.4)
   // Everything nearby notices: predators drop what they were doing.
-  for (const c of cells) if (c.brain) c.brain.rest = 0
+  for (const c of cells)
+    if (c.brain && c.species === 'engulfer') {
+      c.brain.rest = 0
+      c.brain.raid = true
+      c.brain.retarget = 0
+    }
   updateFocus()
   updateBanner()
   hud.banner.classList.add('shown')
@@ -1305,6 +1451,13 @@ function flock(cell: Protocell, steer: Steer) {
 function advanceTransition(dt: number) {
   if (phase === 'colony') {
     phaseTime += dt
+    const wave = phaseTime < 20 ? 0 : phaseTime < 40 ? 1 : 2
+    if (wave !== raidWave) {
+      raidWave = wave
+      populationTimer = 0
+      sound.transitionBegin()
+      haptic([15, 40, 15])
+    }
     if (colony.length < MIN_SURVIVORS) failTransition()
     else if (phaseTime >= TRANSITION_TIME) beginAssembly()
     else updateBanner()
@@ -1319,7 +1472,7 @@ function updateBanner() {
   const left = Math.max(0, Math.ceil(TRANSITION_TIME - phaseTime))
   const text =
     phase === 'colony'
-      ? `Hold together · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} · ${colony.length} cells`
+      ? `${raidStage(phaseTime)} · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} · ${colony.length} cells`
       : 'Binding…'
   if (text !== bannerText) hud.banner.textContent = bannerText = text
 }
@@ -1357,6 +1510,7 @@ function beginAssembly() {
   for (const c of cells) {
     if (!c.brain) continue
     c.brain.prey = null
+    c.brain.raid = false
     c.brain.rest = 30
   }
   updateBanner()
@@ -1385,6 +1539,7 @@ function holdFormation(dt: number) {
 function recordRun(outcome: RunRecord['outcome'], dna: DnaLine[], name = '', form = '') {
   peakBiomass = Math.max(peakBiomass, player.biomass)
   const total = dna.reduce((sum, l) => sum + l.amount, 0)
+  if (import.meta.env.DEV && devPractice) return 0
   save.runs.push({
     path: player.path,
     outcome,
@@ -1418,14 +1573,14 @@ function completeTransition() {
   haptic([30, 50, 30, 50, 90])
   hud.banner.classList.remove('shown')
   const result = lineage ?? lineageFor([...player.traits])
-  const discovered = recordLineage(result.name)
+  const discovered = devPractice ? null : recordLineage(result.name)
   const seconds = Math.round(time - startTime)
   hud.lineageName.textContent = result.name
   hud.lineageForm.textContent = `It became ${result.form}.`
   hud.lineageMutations.textContent = mutationList()
   hud.lineageStats.textContent =
     `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} · peak biomass ×${peakBiomass.toFixed(1)} · ` +
-    `${cellsEaten} cells absorbed · ${evolutions} evolutions · ${colony.length} of ${COLONY_CELLS} cells survived`
+    `${cellsEaten} cells absorbed · ${evolutions} evolutions · ${colony.length} of ${COLONY_CELLS} cells survived · ${stats.combat?.raidLunges ?? 0} predator lunges`
   hud.lineageDiscovered.textContent =
     discovered === null ? '' : `${discovered} ${discovered === 1 ? 'lineage' : 'lineages'} discovered`
   peakBiomass = Math.max(peakBiomass, player.biomass)
@@ -1438,7 +1593,9 @@ function completeTransition() {
     peakBiomass,
   })
   const total = recordRun('lineage', dna, result.name, result.form)
-  hud.lineageDna.textContent = `+${total} DNA  (${dna.map(l => `${l.label.toLowerCase()} ${l.amount}`).join(' · ')})`
+  hud.lineageDna.textContent = devPractice
+    ? 'Practice run · no DNA banked'
+    : `+${total} DNA  (${dna.map(l => `${l.label.toLowerCase()} ${l.amount}`).join(' · ')})`
   hud.lineage.classList.add('shown')
   effects.ripple(focus.x, focus.y, player.palette.rim, 2)
 }
@@ -1597,7 +1754,7 @@ function nextEvolutionCost() {
 
 /** Traits the player could still evolve, in random order: three, or four with Wider Options. */
 function evolutionOptions(): TraitInfo[] {
-  const open = availableTraits(player.traits, player.mutations)
+  const open = availableTraits(player.traits, player.mutations, player.path)
   for (let i = open.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1))
     ;[open[i], open[j]] = [open[j], open[i]]
@@ -1818,29 +1975,38 @@ function updateCamera(dt: number) {
 
 /** Warn about the closest visible organism that can swallow the player. */
 function drawThreatCue(dark: number) {
-  if (deathTime !== null || phase !== 'living' || choosing || confirming) return
+  if (deathTime !== null || (phase !== 'living' && phase !== 'colony') || choosing || confirming) return
+  const x = phase === 'colony' ? focus.x : player.cx
+  const y = phase === 'colony' ? focus.y : player.cy
+  const radius = phase === 'colony' ? focus.r : player.R
   let nearest: Protocell | null = null
   let gap = Infinity
   for (const c of cells) {
-    if (c === player || c.gone || c.engulfedBy || !c.canEat(player)) continue
-    const dx = wrapDelta(c.cx - player.cx, WORLD)
-    const dy = wrapDelta(c.cy - player.cy, WORLD)
+    if (
+      c === player ||
+      c.gone ||
+      c.engulfedBy ||
+      !(phase === 'colony' ? colony.some(member => c.canEat(member)) : c.canEat(player))
+    )
+      continue
+    const dx = wrapDelta(c.cx - x, WORLD)
+    const dy = wrapDelta(c.cy - y, WORLD)
     const d = Math.hypot(dx, dy)
     // Never reveal a threat hidden by darkness or outside the viewport.
     if (dark <= 0.1 && zones.some(z => z.type === 'dark' && z.strengthAt(c.cx, c.cy) > 0.1)) continue
-    if (dark > 0.1 && d > player.R * (player.traits.has('mechanoreception') ? 7 : 3.2)) continue
+    if (dark > 0.1 && d > radius * (player.traits.has('mechanoreception') ? 7 : 3.2)) continue
     if (!view.onScreen(view.sx(c.cx), view.sy(c.cy), 0)) continue
-    const edge = d - c.R - player.R
-    if (edge < gap && edge < player.R * 3) {
+    const edge = d - c.R - radius
+    if (edge < gap && edge < radius * 3) {
       nearest = c
       gap = edge
     }
   }
   if (!nearest) return
-  const a = Math.atan2(wrapDelta(nearest.cy - player.cy, WORLD), wrapDelta(nearest.cx - player.cx, WORLD))
-  const R = player.R * view.zoom
+  const a = Math.atan2(wrapDelta(nearest.cy - y, WORLD), wrapDelta(nearest.cx - x, WORLD))
+  const R = radius * view.zoom
   ctx.save()
-  ctx.translate(view.sx(player.cx), view.sy(player.cy))
+  ctx.translate(view.sx(x), view.sy(y))
   ctx.rotate(a)
   ctx.beginPath()
   ctx.moveTo(R * 1.48, -R * 0.12)
@@ -1851,6 +2017,35 @@ function drawThreatCue(dark: number) {
   ctx.lineJoin = 'round'
   ctx.strokeStyle = `rgba(255,145,125,${0.65 + 0.3 * Math.sin(time * 7) ** 2})`
   ctx.stroke()
+  ctx.restore()
+}
+
+/** Clear wind-up lines turn pursuit into an attack the player can read and sidestep. */
+function drawAttackIntents() {
+  if (phase !== 'colony' || deathTime !== null) return
+  ctx.save()
+  for (const c of cells) {
+    if (!c.brain?.raid || c.brain.coil <= 0 || c.gone || c.engulfedBy) continue
+    const x = view.sx(c.cx),
+      y = view.sy(c.cy)
+    if (!view.onScreen(x, y, c.R * view.zoom)) continue
+    const length = Math.max(140, c.R * 4) * view.zoom
+    const sx = x + c.facingX * c.R * view.zoom,
+      sy = y + c.facingY * c.R * view.zoom
+    const ex = x + c.facingX * length,
+      ey = y + c.facingY * length
+    ctx.strokeStyle = 'rgba(255,155,130,0.8)'
+    ctx.lineWidth = 2
+    ctx.setLineDash([6, 4])
+    ctx.beginPath()
+    ctx.moveTo(sx, sy)
+    ctx.lineTo(ex, ey)
+    ctx.stroke()
+    ctx.setLineDash([])
+    ctx.beginPath()
+    ctx.arc(ex, ey, 4, 0, Math.PI * 2)
+    ctx.stroke()
+  }
   ctx.restore()
 }
 
@@ -1881,7 +2076,13 @@ function render() {
   // Cells being swallowed draw on top of whatever is swallowing them; the player draws above its peers.
   for (const cell of cells)
     if (!cell.engulfedBy && cell !== player && !cell.colony)
-      cell.draw(ctx, view, time, phase === 'living' && deathTime === null && player.canEat(cell))
+      cell.draw(
+        ctx,
+        view,
+        time,
+        deathTime === null &&
+          (phase === 'living' ? player.canEat(cell) : phase === 'colony' && colony.some(c => c.canEat(cell))),
+      )
   drawOrganismFeature(false)
   drawBridges()
   for (const cell of colony) cell.draw(ctx, view, time)
@@ -1890,6 +2091,7 @@ function render() {
   for (const cell of cells) if (cell.engulfedBy) cell.draw(ctx, view, time)
   drawTendril()
   effects.draw(ctx, view)
+  drawAttackIntents()
   let dark = 0
   for (const z of zones) if (z.type === 'dark') dark = Math.max(dark, z.strengthAt(focus.x, focus.y))
   drawDarkness(
@@ -1954,13 +2156,45 @@ function updateHud() {
   hud.mutations.textContent = [...player.mutations].map(id => MUTATIONS[id].name).join(' · ')
   hud.organic.textContent = String(eaten.organic)
   hud.lipid.textContent = String(eaten.lipid)
-  const more = availableTraits(player.traits, player.mutations).length > 0
+  const more = availableTraits(player.traits, player.mutations, player.path).length > 0
   hud.mineral.textContent = more ? `${eaten.mineral} / ${nextEvolutionCost()}` : String(eaten.mineral)
-  hud.biomass.textContent = `×${player.biomass.toFixed(2)}`
+  hud.biomass.textContent = `×${player.biomass.toFixed(2)}${player.biomass > MAX_RUN_BIOMASS * 0.9 ? ' · mature' : ''}`
   hud.goal.textContent =
     `${Math.min(evolutions, TRANSITION_EVOLUTIONS)}/${TRANSITION_EVOLUTIONS} evolutions · ` +
     `×${Math.min(player.biomass, TRANSITION_BIOMASS).toFixed(1)}/×${TRANSITION_BIOMASS}`
 }
+
+const strikeButton = document.createElement('button')
+strikeButton.id = 'strike-btn'
+strikeButton.className = 'combat-button'
+strikeButton.textContent = 'strike · F'
+strikeButton.setAttribute('aria-label', 'Venom strike')
+strikeButton.addEventListener('pointerdown', e => {
+  e.preventDefault()
+  input.queueStrike()
+})
+const latchButton = document.createElement('button')
+latchButton.id = 'latch-btn'
+latchButton.className = 'combat-button'
+latchButton.textContent = 'latch · R'
+latchButton.setAttribute('aria-label', 'Feeding tendril')
+latchButton.addEventListener('pointerdown', e => {
+  e.preventDefault()
+  input.queueLatch()
+})
+// Keep immediate pointer response while supporting Enter/Space activation of focused buttons.
+strikeButton.addEventListener('click', e => {
+  if (e.detail === 0) input.queueStrike()
+})
+latchButton.addEventListener('click', e => {
+  if (e.detail === 0) input.queueLatch()
+})
+const combatHint = document.createElement('div')
+combatHint.id = 'combat-hint'
+combatHint.setAttribute('role', 'status')
+strikeButton.title = 'F: aim a frontal venom strike. Enemies can dodge during the wind-up.'
+latchButton.title = 'R: latch onto a larger wounded enemy, or release the tether.'
+document.body.append(strikeButton, latchButton, combatHint)
 
 const tree = new TreeOfLife(hud.tree, save, () => updateHud())
 const guide = new FieldGuide(
@@ -1975,10 +2209,10 @@ const evolutionTree = new EvolutionTree(
     mutations: player.mutations,
     canChoose:
       choosing && !hud.evolve.classList.contains('mutant') && !!player.path && phase === 'living' && deathTime === null,
-    progress: `${eaten.mineral} / ${nextEvolutionCost()} minerals toward your next evolution`,
+    progress: `${eaten.mineral} / ${nextEvolutionCost()} minerals toward your next evolution · one foreign body system per lineage`,
   }),
   id => {
-    if (choosing && availableTraits(player.traits, player.mutations).some(t => t.id === id)) choose(id)
+    if (choosing && availableTraits(player.traits, player.mutations, player.path).some(t => t.id === id)) choose(id)
   },
   () => input.release(),
 )
@@ -2117,7 +2351,29 @@ function frame(now: number) {
     player.traits.has('burst') && deathTime === null && (phase === 'living' || phase === 'colony') && !choosing
   hud.burstBtn.classList.toggle('shown', canBurst)
   hud.burstBtn.classList.toggle('cooling', player.dashCooldown > 0)
+  const combatReady =
+    (phase === 'living' || phase === 'colony') &&
+    deathTime === null &&
+    !choosing &&
+    !confirming &&
+    !evolutionTree.isOpen &&
+    !guide.isOpen &&
+    !tree.isOpen
+  strikeButton.hidden = !combatReady || !player.traits.has('venom')
+  latchButton.hidden = !combatReady || !player.traits.has('tendril')
+  const attackers = phase === 'colony' ? colony : [player]
+  const strikeRecovery = Math.min(...attackers.map(c => c.attackCooldown))
+  strikeButton.disabled = strikeRecovery > 0
+  strikeButton.textContent = strikeRecovery > 0 ? `strike ${strikeRecovery.toFixed(1)}s` : 'strike · F'
+  latchButton.disabled = !drainTether.target && drainTether.cooldown > 0
+  latchButton.textContent = drainTether.target
+    ? `release ${Math.ceil(6 - drainTether.age)}s`
+    : drainTether.cooldown > 0
+      ? `latch ${drainTether.cooldown.toFixed(1)}s`
+      : 'latch · R'
 
+  combatHint.hidden = !combatReady || combatMessageTime <= 0
+  combatHint.textContent = combatMessage
   if (input.used) hud.hint.classList.add('hidden')
   fpsFrames++
   fpsTime += elapsed
@@ -2133,6 +2389,7 @@ requestAnimationFrame(frame)
 // Dev-only handle for poking at the simulation from the console.
 if (import.meta.env.DEV) {
   const devTools = {
+    finalePath: 'producer' as PathId,
     game: {
       get player() {
         return player
@@ -2149,10 +2406,45 @@ if (import.meta.env.DEV) {
         player.addTrait(id)
         updateHud()
       },
+      practiceFinale() {
+        reset()
+        devPractice = true
+        const path = devTools.finalePath
+        player.setPath(path)
+        const builds: Record<PathId, TraitId[]> = {
+          pursuer: ['flagellum', 'burst', 'engulfing', 'chemoreception'],
+          bulwark: ['membrane', 'spikes', 'venom', 'acidResistance'],
+          trapper: ['engulfing', 'tendril', 'photosynthesis', 'lure'],
+          producer: ['photosynthesis', 'pigment', 'chemoreception', 'mechanoreception'],
+        }
+        for (const id of builds[path]) player.addTrait(id)
+        evolutions = 4
+        player.grow(15)
+        simulate(STEP) // Settle growth and normalize the world just as in a real run.
+        updateHud()
+        openConfirm()
+      },
+      practiceCombat() {
+        reset()
+        devPractice = true
+        cells = [player]
+        player.setPath('trapper')
+        for (const id of ['engulfing', 'tendril', 'membrane', 'spikes', 'venom'] as TraitId[]) player.addTrait(id)
+        player.orient(1, 0)
+        evolutions = 5
+        const target = new Protocell(player.cx + player.R * 3.2, player.cy, player.biomass * 2.8, 'engulfer')
+        target.brain = newBrain()
+        target.brain.rest = 2
+        cells.push(target)
+        updateHud()
+      },
       /** Skip ahead to the Great Transition: evolve to the requirement and grow. */
       readyTransition() {
-        while (evolutions < TRANSITION_EVOLUTIONS && availableTraits(player.traits, player.mutations).length) {
-          player.addTrait(availableTraits(player.traits, player.mutations)[0].id)
+        while (
+          evolutions < TRANSITION_EVOLUTIONS &&
+          availableTraits(player.traits, player.mutations, player.path).length
+        ) {
+          player.addTrait(availableTraits(player.traits, player.mutations, player.path)[0].id)
           evolutions++
         }
         player.grow(Math.max(0, TRANSITION_BIOMASS - player.biomass))
@@ -2257,7 +2549,8 @@ if (import.meta.env.DEV) {
             }
           }
           // 'transition': spawns during the colony minute must still be out of view and in habitat.
-          for (const t of availableTraits(player.traits, player.mutations).slice(0, 4)) player.addTrait(t.id)
+          for (const t of availableTraits(player.traits, player.mutations, player.path).slice(0, 4))
+            player.addTrait(t.id)
           evolutions = Math.max(evolutions, 4)
           player.grow(Math.max(0, 16 - player.biomass))
           run(0.5)
@@ -2350,6 +2643,9 @@ if (import.meta.env.DEV) {
   }
   Object.assign(window, devTools)
   const playtest = gui.addFolder('Playtest')
+  playtest.add(devTools, 'finalePath', ['pursuer', 'bulwark', 'trapper', 'producer']).name('finale build')
+  playtest.add(devTools.game, 'practiceFinale').name('practice finale')
+  playtest.add(devTools.game, 'practiceCombat').name('practice combat')
   playtest.add(devTools.game, 'gather').name('preview ecosystem')
   playtest.add(devTools.game, 'readyTransition').name('prepare transition')
   playtest.add(devTools.game, 'skipTimer').name('skip transition timer')

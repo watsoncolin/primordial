@@ -1,4 +1,4 @@
-import { PATHS, PATH_BRANCHES, pathForm, type PathId } from './paths'
+import { hybridAllowed, PATHS, PATH_BRANCHES, pathForm, type PathId } from './paths'
 import { TRAITS, availableTraits, type TraitId } from './traits'
 import { MUTATIONS, type MutationId } from './mutations'
 import { traitPreview, pathPreview } from './preview'
@@ -90,7 +90,7 @@ export class EvolutionTree {
     text.append(title, detail, note)
     identity.append(img, text)
     this.dialog.append(identity)
-    const ready = new Set(availableTraits(state.traits, state.mutations).map(t => t.id))
+    const ready = new Set(availableTraits(state.traits, state.mutations, state.path).map(t => t.id))
     const branches = document.createElement('div')
     branches.className = 'tree-branches'
     for (const branch of PATH_BRANCHES[path.id]) {
@@ -156,6 +156,8 @@ export class EvolutionTree {
       trait.requiresMutation ? `${MUTATIONS[trait.requiresMutation].name} mutation` : '',
     ].filter(Boolean)
     requirements.textContent = needs.length ? `Requires ${needs.join(' + ')}` : 'No prerequisite adaptation'
+    if (!hybridAllowed(state.path, state.traits, id))
+      requirements.textContent = 'Hybrid limit: your foreign body system is already chosen.'
     if (id === 'sealed' || id === 'toxic') requirements.textContent += ' · mutually exclusive'
     button.append(img, title, status, description, requirements)
     button.disabled = !state.canChoose || owned || !ready.has(id)

@@ -1,3 +1,4 @@
+import { boundedGrowth, MAX_RUN_BIOMASS, PATH_BALANCE } from './balance'
 import { PATHS, type PathId } from './paths'
 import type { Brain } from './ai'
 import {
@@ -234,6 +235,10 @@ export class Protocell {
   private budDirY = 0
   /** Venom: seconds of poisoning left (slowed, wasting away). */
   poison = 0
+  attackCooldown = 0
+  attackWindup = 0
+  tethered = false
+  biomassCeiling = Infinity
   /** Set each step by the zone the cell is in (see biomes.ts): water drag and sunlight multipliers. */
   envDrag = 1
   envLight = 1
@@ -316,6 +321,7 @@ export class Protocell {
       this.decorTail.growth = 1
     }
     this.aura = this.palette.aura ? glowSprite(...this.palette.aura) : null
+    this.biomassCeiling = species === 'player' ? MAX_RUN_BIOMASS : Math.max(biomass * 3, scale.biomass * 8)
     this.biomass = biomass
     this.baseBiomass = biomass
     const r = (this.R = this.targetR = radiusFor(biomass))
@@ -351,7 +357,10 @@ export class Protocell {
 
   grow(amount: number) {
     // Burning, leaking and poison can only waste a cell away so far.
-    this.biomass = Math.max(this.biomass + amount, scale.biomass * 0.02)
+    this.biomass = Math.max(
+      boundedGrowth(this.biomass, amount, this.biomassCeiling, this.species === 'player'),
+      scale.biomass * 0.02,
+    )
     this.targetR = radiusFor(this.biomass)
   }
 
@@ -535,6 +544,7 @@ export class Protocell {
       this.poison = Math.max(0, this.poison - dt)
       this.grow(-this.biomass * 0.03 * dt)
     }
+    this.attackCooldown = Math.max(0, this.attackCooldown - dt)
     this.contract = Math.max(0, this.contract - dt)
     this.emphasis = Math.max(0, this.emphasis - dt / 1.6)
     this.lean += (this.leanWant - this.lean) * Math.min(1, dt * 6)
@@ -543,7 +553,9 @@ export class Protocell {
     if (this.traits.has('photosynthesis') && !eater && this.biomass < this.growthCap) {
       // Light becomes biomass; it works best when the cell is still.
       const still = mag < 0.1 ? PHOTO_STILL_BONUS : 1
-      this.grow(scale.biomass * PHOTO_RATE * still * this.envLight * dt)
+      this.grow(
+        scale.biomass * PHOTO_RATE * still * this.envLight * dt * (this.path ? PATH_BALANCE[this.path].light : 1),
+      )
     }
     const { cx, cy, cvx, cvy, R, pts, restX, restY, nx, ny, weight } = this
 
@@ -579,7 +591,10 @@ export class Protocell {
       (muts.has('hypermetabolism') ? HYPER_THRUST : 1) *
       (muts.has('gigantism') ? GIGANTISM_THRUST : 1) *
       (muts.has('miniaturization') ? MINI_THRUST : 1) *
-      (this.poison > 0 ? 0.5 : 1)
+      (this.poison > 0 ? 0.5 : 1) *
+      (this.path ? PATH_BALANCE[this.path].thrust : 1) *
+      (this.tethered ? 0.35 : 1) *
+      (this.attackWindup > 0 ? 0.3 : 1)
     const stiffness = tuning.stiffness * (thick ? MEMBRANE_STIFFNESS : 1)
     const damping = tuning.wobbleDamping * (thick ? 1.3 : 1)
     const dragScale = (thick ? MEMBRANE_DRAG : 1) * (muts.has('sticky') ? STICKY_DRAG : 1) * this.envDrag
@@ -614,7 +629,7 @@ export class Protocell {
     // Directional bodies and ram-equipped cells swing round to face their aim.
     // The torque also resists the body's current spin: without that, a body chasing a moving aim
     // keeps rotating, and a spinning teardrop in front-weighted drag swims like a propeller.
-    if ((this.plan.directional || this.traits.has('spikes')) && !tail) {
+    if ((this.plan.directional || this.traits.has('spikes') || this.traits.has('venom')) && !tail) {
       const want = this.aimSet ? 1 : mag > 0.05 ? mag : 0
       let spin = 0
       let inertia = 0
@@ -807,7 +822,7 @@ export class Protocell {
 
   /** Finish swallowing another cell: its body becomes chunks being digested. */
   ingestCell(prey: Protocell) {
-    this.grow(prey.biomass * 0.8)
+    this.grow(prey.biomass * (this.path ? PATH_BALANCE[this.path].assimilation : 0.8))
     if (this.traits.has('engulfing')) this.digest = DIGEST_TIME * Math.min(1, prey.biomass / this.biomass)
     const chunks = 3 + Math.round((prey.biomass / this.biomass) * 6)
     for (let i = 0; i < chunks; i++) {
@@ -1009,6 +1024,20 @@ export class Protocell {
       ctx.lineWidth = Math.max(2, R * 0.07)
       ctx.beginPath()
       ctx.arc(cx, cy, R * 0.96, angle - 0.35, angle + 0.35)
+      ctx.stroke()
+      ctx.restore()
+    }
+    if (this.traits.has('venom')) {
+      ctx.save()
+      ctx.translate(cx, cy)
+      ctx.rotate(Math.atan2(this.facingY, this.facingX))
+      const reach = this.attackWindup > 0 ? 1.35 + Math.sin(this.attackWindup * 20) * 0.1 : 1.2
+      ctx.strokeStyle = this.attackCooldown > 0 ? 'rgba(190,110,255,0.4)' : 'rgba(220,155,255,0.95)'
+      ctx.lineWidth = Math.max(2, R * 0.06)
+      ctx.beginPath()
+      ctx.moveTo(R * 0.8, -R * 0.15)
+      ctx.lineTo(R * reach, 0)
+      ctx.lineTo(R * 0.8, R * 0.15)
       ctx.stroke()
       ctx.restore()
     }

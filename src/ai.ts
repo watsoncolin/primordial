@@ -1,3 +1,4 @@
+import { exposedPrey } from './finale'
 import { WORLD, tuning } from './config'
 import { TAU, rand, wrapDelta } from './math'
 import type { Nutrient, Nutrients } from './nutrients'
@@ -43,6 +44,9 @@ export interface Brain {
   exhausted: number
   attacker: Protocell | null
   alarm: number
+  raid: boolean
+  strikeX: number
+  strikeY: number
 }
 
 export function newBrain(): Brain {
@@ -61,6 +65,9 @@ export function newBrain(): Brain {
     exhausted: 0,
     attacker: null,
     alarm: 0,
+    raid: false,
+    strikeX: 1,
+    strikeY: 0,
   }
 }
 
@@ -92,6 +99,9 @@ export function think(cell: Protocell, dt: number, cells: Protocell[], nutrients
     if (brain.coil <= 0) {
       brain.coil = 0
       brain.lunge = LUNGE_TIME
+      brain.strikeX = cell.facingX
+      brain.strikeY = cell.facingY
+      brain.heading = Math.atan2(brain.strikeY, brain.strikeX)
     }
   } else if (brain.lunge > 0) {
     brain.lunge -= dt
@@ -102,8 +112,16 @@ export function think(cell: Protocell, dt: number, cells: Protocell[], nutrients
   } else {
     brain.recover = Math.max(0, brain.recover - dt)
   }
-  cell.boost = brain.lunge > 0 ? tuning.engulferLunge : 1
+  cell.boost = brain.lunge > 0 ? tuning.engulferLunge : brain.raid ? 1.3 : 1
   cell.pose = brain.coil > 0 ? 'coil' : brain.lunge > 0 ? 'lunge' : brain.recover > 0 ? 'recover' : 'idle'
+  if (brain.lunge > 0) {
+    // Once committed, the strike cannot home in on a sidestepping target.
+    out.x = brain.strikeX
+    out.y = brain.strikeY
+    out.mag = 1
+    cell.aim(out.x, out.y)
+    return out
+  }
   if (brain.recover > 0) {
     // Spent: drifts slack for a moment, an opening for anything quick enough to use it.
     out.x = Math.cos(brain.heading)
@@ -157,7 +175,15 @@ export function think(cell: Protocell, dt: number, cells: Protocell[], nutrients
   if (brain.retarget <= 0) {
     brain.retarget = RETARGET
     const sense = cell.species === 'engulfer' ? tuning.engulferSense : GRAZER_SENSE * 0.5
-    brain.prey = brain.rest > 0 ? null : nearestCell(cell, cells, sense + cell.R, other => cell.canEat(other), true)
+    brain.prey =
+      brain.rest > 0
+        ? null
+        : brain.raid
+          ? exposedPrey(
+              cell,
+              cells.filter(c => c.colony),
+            )
+          : nearestCell(cell, cells, sense + cell.R, other => cell.canEat(other), true)
     brain.food = nearestFood(cell, nutrients, GRAZER_SENSE)
   }
 
@@ -180,8 +206,8 @@ export function think(cell: Protocell, dt: number, cells: Protocell[], nutrients
       // Cruise slowly, then a short burst once the prey is close.
       const gap = Math.hypot(wrapDelta(prey.cx - cell.cx, WORLD), wrapDelta(prey.cy - cell.cy, WORLD)) - cell.R - prey.R
       if (gap < LUNGE_RANGE && brain.lungeCooldown <= 0 && brain.coil <= 0 && brain.lunge <= 0) {
-        brain.coil = COIL_TIME
-        brain.lungeCooldown = COIL_TIME + LUNGE_TIME + LUNGE_COOLDOWN
+        brain.coil = brain.raid ? 0.75 : COIL_TIME
+        brain.lungeCooldown = brain.coil + LUNGE_TIME + LUNGE_COOLDOWN
       }
       if (brain.coil > 0) {
         // The tell: nearly stopped, body swung round to point straight at the prey.
