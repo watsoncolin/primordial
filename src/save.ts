@@ -1,3 +1,4 @@
+import type { PathId } from './paths'
 import type { MutationId } from './mutations'
 import type { TraitId } from './traits'
 
@@ -40,6 +41,7 @@ export const UNLOCKS: Record<UnlockId, UnlockInfo> = {
 
 /** One run, as it's remembered on the Tree of Life. */
 export interface RunRecord {
+  path?: PathId | null
   outcome: 'lineage' | 'extinct'
   /** Generation the run was played in. */
   generation: number

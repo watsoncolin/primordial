@@ -1,3 +1,4 @@
+import type { PathId } from './paths'
 import { TAU, rand } from './math'
 import type { Species } from './protocell'
 
@@ -66,7 +67,7 @@ export const PLANS: Record<Species, BodyPlan> = {
   },
   // Drifting protocell: a thin, irregular, clear sac with a lazy asymmetric squirm.
   grazer: {
-    profile: (t, s) => 1 + 0.09 * Math.sin(2 * t + s.p1) + 0.06 * Math.sin(3 * t + s.p2),
+    profile: (t, s) => 1 + 0.15 * Math.sin(2 * t + s.p1) + 0.08 * Math.sin(3 * t + s.p2),
     directional: false,
     turn: 0,
     rim: 0.5,
@@ -78,24 +79,24 @@ export const PLANS: Record<Species, BodyPlan> = {
   },
   // Flagellated hunter: a directional teardrop, narrow at the tail, with a feeding bulge in front.
   engulfer: {
-    profile: t => ellipse(t, 1.24, 0.82) * (1 - 0.16 * rear(t) ** 2) * (1 + 0.08 * front(t) ** 6),
+    profile: t => ellipse(t, 1.3, 0.74) * (1 - 0.18 * rear(t) ** 2),
     directional: true,
     turn: 170,
     rim: 0.85,
     rimAlpha: 0.5,
-    fill: 1,
+    fill: 1.6,
     inner: 4,
     squirm: 0.6,
     squirmRate: 1,
   },
   // Light colony: three to five rounded lobes in a rosette.
   producer: {
-    profile: (t, s) => 0.78 + 0.3 * (0.5 + 0.5 * Math.cos(s.lobes * t + s.p1)) ** 1.5,
+    profile: (t, s) => 0.72 + 0.4 * (0.5 + 0.5 * Math.cos(s.lobes * t + s.p1)) ** 1.5,
     directional: false,
     turn: 0,
     rim: 0.55,
     rimAlpha: 0.45,
-    fill: 0.85,
+    fill: 1.6,
     inner: 0,
     squirm: 0.35,
     squirmRate: 0.5,
@@ -107,7 +108,7 @@ export const PLANS: Record<Species, BodyPlan> = {
     turn: 90,
     rim: 0.6,
     rimAlpha: 0.45,
-    fill: 0.9,
+    fill: 1.8,
     inner: 2,
     squirm: 0.4,
     squirmRate: 0.7,
@@ -119,7 +120,7 @@ export const PLANS: Record<Species, BodyPlan> = {
     turn: 140,
     rim: 0.6,
     rimAlpha: 0.45,
-    fill: 0.8,
+    fill: 1.3,
     inner: 1,
     squirm: 0.4,
     squirmRate: 0.6,
@@ -128,6 +129,86 @@ export const PLANS: Record<Species, BodyPlan> = {
 
 /** Below this on-screen radius, fine detail (fringe, plate seams, light structures) is skipped. */
 export const DETAIL_MIN_PX = 9
+
+/** Anatomy replaces the shared floating-dot interior of specialist NPCs. Clipped by the body. */
+export function drawRoleInterior(
+  ctx: CanvasRenderingContext2D,
+  species: Species,
+  cx: number,
+  cy: number,
+  R: number,
+  fx: number,
+  fy: number,
+  rgb: string,
+  time: number,
+  lobes: number,
+  phase: number,
+) {
+  ctx.save()
+  ctx.translate(cx, cy)
+  ctx.rotate(Math.atan2(fy, fx))
+  ctx.lineWidth = Math.max(1, R * 0.025)
+  if (species === 'engulfer') {
+    // A long digestive channel and curved muscle bands make the hunter directional.
+    ctx.beginPath()
+    ctx.ellipse(-R * 0.08, 0, R * 0.76, R * 0.17, 0, 0, TAU)
+    ctx.fillStyle = `rgba(${rgb},0.24)`
+    ctx.fill()
+    ctx.strokeStyle = `rgba(${rgb},0.5)`
+    ctx.stroke()
+    for (let i = 0; i < 5; i++) {
+      const x = R * (-0.68 + i * 0.28)
+      const w = R * (0.36 + 0.04 * Math.sin(time * 3 - i))
+      ctx.beginPath()
+      ctx.moveTo(x - R * 0.08, -w)
+      ctx.quadraticCurveTo(x + R * 0.1, 0, x - R * 0.08, w)
+      ctx.strokeStyle = `rgba(${rgb},0.35)`
+      ctx.stroke()
+    }
+  } else if (species === 'producer') {
+    // Each petal has its own translucent chamber; a central hub joins the colony.
+    for (let i = 0; i < lobes; i++) {
+      const a = (TAU * i - phase) / lobes
+      ctx.save()
+      ctx.rotate(a)
+      ctx.beginPath()
+      ctx.ellipse(R * 0.52, 0, R * 0.38, R * 0.25, 0, 0, TAU)
+      ctx.fillStyle = 'rgba(95,180,75,0.3)'
+      ctx.fill()
+      ctx.strokeStyle = 'rgba(185,240,130,0.55)'
+      ctx.stroke()
+      drawLightPlate(ctx, R * 0.58, 0, R * 0.2, Math.PI / 2, 1)
+      ctx.restore()
+    }
+    ctx.beginPath()
+    ctx.arc(0, 0, R * 0.16, 0, TAU)
+    ctx.fillStyle = 'rgba(215,245,150,0.55)'
+    ctx.fill()
+  } else if (species === 'scavenger') {
+    // Broad overlapping shell segments, rather than another ring around a bubble.
+    for (let i = 0; i < 4; i++) {
+      const x = R * (-0.62 + i * 0.4)
+      const h = R * (0.58 - Math.abs(i - 1.5) * 0.07)
+      ctx.beginPath()
+      ctx.roundRect(x - R * 0.21, -h, R * 0.4, h * 2, R * 0.15)
+      ctx.fillStyle = `rgba(${rgb},${0.16 + i * 0.025})`
+      ctx.fill()
+      ctx.strokeStyle = `rgba(${rgb},0.5)`
+      ctx.stroke()
+    }
+  } else if (species === 'filter') {
+    // Fan ribs converge at the stalk and carry a visibly moving feeding beat.
+    for (let i = -3; i <= 3; i++) {
+      const y = (i / 3) * R * 0.83
+      ctx.beginPath()
+      ctx.moveTo(-R * 0.55, 0)
+      ctx.quadraticCurveTo(0, y * 0.5, R * 0.35, y)
+      ctx.strokeStyle = `rgba(${rgb},${0.4 + 0.12 * Math.sin(time * 5 - i)})`
+      ctx.stroke()
+    }
+  }
+  ctx.restore()
+}
 
 /**
  * Thick membrane as broad armour plates following the outline. As armour cracks, the plates pull
@@ -381,4 +462,22 @@ export function drawTraitMarks(
     ctx.strokeStyle = 'rgba(220,200,255,0.75)'
     ctx.stroke()
   }
+}
+
+/** Player lineages keep a distinct whole-body silhouette as adaptations accumulate. */
+export const PATH_PLANS: Record<PathId, BodyPlan> = {
+  pursuer: {
+    ...PLANS.engulfer,
+    profile: t => ellipse(t, 1.55, 0.6) * (1 - 0.22 * rear(t) ** 2),
+    rim: 1,
+    rimAlpha: 0.7,
+  },
+  bulwark: { ...PLANS.scavenger, profile: t => 0.98 + 0.09 * Math.cos(6 * t), rim: 1.35, rimAlpha: 0.75, squirm: 0.2 },
+  trapper: { ...PLANS.filter, profile: t => ellipse(t, 0.8, 1.3) * (1 - 0.35 * front(t) ** 4), rim: 1, rimAlpha: 0.7 },
+  producer: {
+    ...PLANS.producer,
+    profile: t => 0.78 + 0.4 * (0.5 + 0.5 * Math.cos(5 * t)) ** 1.5,
+    rim: 1,
+    rimAlpha: 0.7,
+  },
 }

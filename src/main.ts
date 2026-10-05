@@ -1,3 +1,6 @@
+import { EvolutionTree } from './evolution-tree'
+import { PATHS } from './paths'
+import { ramImpact } from './combat'
 import GUI from 'lil-gui'
 import { type Steer, aiWorld, newBrain, think } from './ai'
 import {
@@ -37,7 +40,7 @@ import { type Kind, Nutrients } from './nutrients'
 import { NUTRIENT_RGB, Protocell, type Species } from './protocell'
 import { type Vent, placeVents } from './vents'
 import {
-  EVOLUTION_COST,
+  evolutionThreshold,
   SPIKE_BITE,
   SPIKE_FULL_SPEED,
   SPIKE_MIN_SPEED,
@@ -71,7 +74,8 @@ import {
 import { type DnaLine, type RunRecord, type RunStats, dnaFor, loadSave, writeSave } from './save'
 import { Senses } from './senses'
 import { drawFold, drawLightPlate } from './anatomy'
-import { traitPreview } from './preview'
+import { traitPreview, pathPreview } from './preview'
+import { FieldGuide } from './field-guide'
 import { TreeOfLife } from './tree'
 import {
   ASSEMBLY_TIME,
@@ -92,7 +96,7 @@ const STEP = 1 / 60
 const SUBSTEPS = 3
 const POPULATION_CHECK = 2
 /** Time runs at this fraction of normal speed while you choose an evolution. */
-const CHOICE_TIME_SCALE = 0.12
+const CHOICE_TIME_SCALE = 0
 /** Other cells get less out of each particle, so tiny ones stay tiny long enough to be prey. */
 const NPC_GROWTH = 0.35
 
@@ -731,6 +735,36 @@ function interact() {
       if (dx > reach || dx < -reach || dy > reach || dy < -reach) continue
       const d = Math.hypot(dx, dy)
       if (d > reach) continue
+      // Resolve an intentional strike before a larger enemy can swallow the attacker.
+      const nx = dx / (d || 1)
+      const ny = dy / (d || 1)
+      const closingSpeed = (a.cvx - b.cvx) * nx + (a.cvy - b.cvy) * ny
+      if (!safe && d < a.R + b.R) {
+        const ram = (attacker: Protocell, victim: Protocell, x: number, y: number) => {
+          if (!attacker.traits.has('spikes') || attacker.canEat(victim) || victim.spikeImmune > 0) return
+          const impact = ramImpact(
+            closingSpeed,
+            attacker.cvx * x + attacker.cvy * y,
+            attacker.facingX * x + attacker.facingY * y,
+            attacker.ramRecovery > 0,
+          )
+          if (!impact) return
+          tear(victim, attacker, SPIKE_FULL_SPEED * impact, true)
+          attacker.ramRecovery = 1.4
+          // Recoil creates a brief escape window rather than immunity to pursuit.
+          attacker.shielded = Math.max(attacker.shielded, 0.35)
+          for (const p of attacker.pts) {
+            p.vx -= x * 65
+            p.vy -= y * 65
+          }
+          for (const p of victim.pts) {
+            p.vx += x * 35
+            p.vy += y * 35
+          }
+        }
+        ram(a, b, nx, ny)
+        ram(b, a, -nx, -ny)
+      }
       // Swallowing starts once the prey's centre reaches the membrane (or a pseudopod); the engulf
       // pulls it the rest of the way. A freshly cracked thick membrane just bounces.
       if (!safe && a.canEat(b) && b.shielded <= 0) {
@@ -794,10 +828,10 @@ function eat(eater: Protocell, prey: Protocell) {
 }
 
 /** Spikes: knock a chunk of biomass off `victim`; it sprays out as food. */
-function tear(victim: Protocell, spiky: Protocell, speed: number) {
+function tear(victim: Protocell, spiky: Protocell, speed: number, ram = false) {
   if (speed < SPIKE_MIN_SPEED || victim.spikeImmune > 0 || victim.engulfedBy) return
   victim.spikeImmune = SPIKE_RECOVERY
-  const bite = SPIKE_BITE * (spiky.mutations.has('hollowSpines') ? HOLLOW_SPIKE_BITE : 1)
+  const bite = (ram ? 0.24 : SPIKE_BITE) * (spiky.mutations.has('hollowSpines') ? HOLLOW_SPIKE_BITE : 1)
   const lost = victim.biomass * bite * Math.min(1, speed / SPIKE_FULL_SPEED)
   if (spiky.traits.has('venom')) victim.poison = VENOM_TIME
   if (victim === player) addMutagen(MUTAGEN_HURT)
@@ -806,10 +840,13 @@ function tear(victim: Protocell, spiky: Protocell, speed: number) {
     haptic(15)
   }
   victim.grow(-lost)
+  victim.wounded = 4
   // Spray from the side that was hit.
   const dx = wrapDelta(spiky.cx - victim.cx, WORLD)
   const dy = wrapDelta(spiky.cy - victim.cy, WORLD)
   const d = Math.hypot(dx, dy) || 1
+  victim.woundX = dx / d
+  victim.woundY = dy / d
   const hitX = victim.cx + (dx / d) * victim.R
   const hitY = victim.cy + (dy / d) * victim.R
   const count = 6 + Math.round(Math.min(1, speed / SPIKE_FULL_SPEED) * 8)
@@ -835,7 +872,10 @@ function tear(victim: Protocell, spiky: Protocell, speed: number) {
   // Getting torn makes a predator back off for a moment.
   if (victim.brain) {
     victim.brain.lunge = 0
-    victim.brain.rest = Math.max(victim.brain.rest, 1.5)
+    victim.brain.rest = Math.max(victim.brain.rest, 0.5)
+    victim.brain.attacker = spiky
+    victim.brain.alarm = 6
+    victim.brain.retarget = 0
   }
   if (victim === player) updateHud()
 }
@@ -1002,7 +1042,7 @@ function rupture(cell: Protocell, eater: Protocell) {
   const seconds = Math.round(time - startTime)
   hud.deathStats.textContent =
     `Survived ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} · ` +
-    `peak biomass ×${cell.biomass.toFixed(2)} · ${cellsEaten} cells absorbed`
+    `peak biomass ×${peakBiomass.toFixed(2)} · ${cellsEaten} cells absorbed`
   hud.deathCause.textContent =
     eater.species === 'engulfer' ? 'Engulfed by a predatory protocell' : 'Absorbed by a larger protocell'
   hud.death.classList.add('shown')
@@ -1143,6 +1183,7 @@ function popBud(cell: Protocell) {
   cell.grow(-share)
   const [bx, by] = cell.budDir
   const daughter = new Protocell(cell.cx + bx * cell.R * 1.15, cell.cy + by * cell.R * 1.15, share, 'offspring')
+  if (cell.path) daughter.setPath(cell.path)
   daughter.brain = newBrain()
   for (const p of daughter.pts) {
     p.vx = cell.cvx + bx * 70
@@ -1198,6 +1239,7 @@ function beginTransition() {
       each,
       'player',
     )
+    if (player.path) c.setPath(player.path)
     c.colony = true
     for (const t of traits) c.addTrait(t)
     for (const p of c.pts) {
@@ -1344,6 +1386,7 @@ function recordRun(outcome: RunRecord['outcome'], dna: DnaLine[], name = '', for
   peakBiomass = Math.max(peakBiomass, player.biomass)
   const total = dna.reduce((sum, l) => sum + l.amount, 0)
   save.runs.push({
+    path: player.path,
     outcome,
     generation: save.generation,
     name,
@@ -1412,7 +1455,7 @@ function failTransition() {
   hud.deathCause.textContent = `Only ${colony.length} of ${COLONY_CELLS} cells were left; it takes ${MIN_SURVIVORS} to bind.`
   hud.deathStats.textContent =
     `Survived ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} · ` +
-    `peak biomass ×${player.biomass.toFixed(2)} · ${cellsEaten} cells absorbed`
+    `peak biomass ×${peakBiomass.toFixed(2)} · ${cellsEaten} cells absorbed`
   hud.death.classList.add('shown')
 }
 
@@ -1549,7 +1592,7 @@ function drawBridges() {
 }
 
 function nextEvolutionCost() {
-  return EVOLUTION_COST[clamp(evolutions - freeEvolutions, 0, EVOLUTION_COST.length - 1)]
+  return evolutionThreshold(evolutions - freeEvolutions)
 }
 
 /** Traits the player could still evolve, in random order: three, or four with Wider Options. */
@@ -1559,7 +1602,14 @@ function evolutionOptions(): TraitInfo[] {
     const j = Math.floor(Math.random() * (i + 1))
     ;[open[i], open[j]] = [open[j], open[i]]
   }
-  return open.slice(0, save.unlocks.includes('widerOptions') ? 4 : 3)
+  const count = save.unlocks.includes('widerOptions') ? 4 : 3
+  if (player.path) {
+    const favored = PATHS[player.path].traits
+    const suited = open.filter(t => favored.includes(t.id))
+    const hybrid = open.filter(t => !favored.includes(t.id))
+    return [...suited.slice(0, 2), ...hybrid, ...suited.slice(2)].slice(0, count)
+  }
+  return open.slice(0, count)
 }
 
 /** Debug: skip the mineral requirement. */
@@ -1584,9 +1634,10 @@ interface CardSpec {
   pick: () => void
 }
 
-/** Slow time and lay out cards to choose from (evolutions, or mutations with Directed Mutation). */
+/** Pause time while reading evolution or directed-mutation choices. */
 function openCards(title: string, subtitle: string, specs: CardSpec[], mutant = false) {
   choosing = true
+  hud.evolve.classList.remove('paths')
   input.release()
   hud.evolveTitle.textContent = title
   hud.evolveSubtitle.textContent = subtitle
@@ -1614,6 +1665,25 @@ function openChoice(
   title = 'Evolution',
   subtitle = 'Your protocell has gathered enough minerals to change.',
 ) {
+  if (!player.path && evolutions === 0) {
+    openCards(
+      'Choose your evolutionary path',
+      'Your first adaptation shapes your body and how you survive. Later choices can branch into hybrids.',
+      Object.values(PATHS).map(path => ({
+        icon: `<img class="preview" src="${pathPreview(path.id)}" alt="${path.name} body">`,
+        name: path.name,
+        note: `starts with ${TRAITS[path.starter].name}`,
+        tagline: path.tagline,
+        detail: path.detail,
+        pick: () => {
+          player.setPath(path.id)
+          choose(path.starter)
+        },
+      })),
+    )
+    hud.evolve.classList.add('paths')
+    return
+  }
   if (!options.length) return
   openCards(
     title,
@@ -1621,7 +1691,7 @@ function openChoice(
     options.map(trait => ({
       // The card shows your own body with this adaptation, not just a symbol.
       icon:
-        `<img class="preview" src="${traitPreview(trait.id, player.traits)}" alt="">` +
+        `<img class="preview" src="${traitPreview(trait.id, player.traits, player.path)}" alt="">` +
         `<span class="badge">${TRAIT_ICONS[trait.id]}</span>`,
       name: trait.name,
       note: trait.requires
@@ -1746,6 +1816,44 @@ function updateCamera(dt: number) {
   view.zoom += (targetZoom() - view.zoom) * (1 - Math.exp(-1.5 * dt))
 }
 
+/** Warn about the closest visible organism that can swallow the player. */
+function drawThreatCue(dark: number) {
+  if (deathTime !== null || phase !== 'living' || choosing || confirming) return
+  let nearest: Protocell | null = null
+  let gap = Infinity
+  for (const c of cells) {
+    if (c === player || c.gone || c.engulfedBy || !c.canEat(player)) continue
+    const dx = wrapDelta(c.cx - player.cx, WORLD)
+    const dy = wrapDelta(c.cy - player.cy, WORLD)
+    const d = Math.hypot(dx, dy)
+    // Never reveal a threat hidden by darkness or outside the viewport.
+    if (dark <= 0.1 && zones.some(z => z.type === 'dark' && z.strengthAt(c.cx, c.cy) > 0.1)) continue
+    if (dark > 0.1 && d > player.R * (player.traits.has('mechanoreception') ? 7 : 3.2)) continue
+    if (!view.onScreen(view.sx(c.cx), view.sy(c.cy), 0)) continue
+    const edge = d - c.R - player.R
+    if (edge < gap && edge < player.R * 3) {
+      nearest = c
+      gap = edge
+    }
+  }
+  if (!nearest) return
+  const a = Math.atan2(wrapDelta(nearest.cy - player.cy, WORLD), wrapDelta(nearest.cx - player.cx, WORLD))
+  const R = player.R * view.zoom
+  ctx.save()
+  ctx.translate(view.sx(player.cx), view.sy(player.cy))
+  ctx.rotate(a)
+  ctx.beginPath()
+  ctx.moveTo(R * 1.48, -R * 0.12)
+  ctx.lineTo(R * 1.68, 0)
+  ctx.lineTo(R * 1.48, R * 0.12)
+  ctx.lineWidth = Math.max(2, R * 0.045)
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  ctx.strokeStyle = `rgba(255,145,125,${0.65 + 0.3 * Math.sin(time * 7) ** 2})`
+  ctx.stroke()
+  ctx.restore()
+}
+
 let vignette: CanvasGradient
 
 function resize() {
@@ -1771,7 +1879,9 @@ function render() {
   for (const vent of vents) vent.draw(ctx, view, time)
   nutrients.draw(ctx, view, time)
   // Cells being swallowed draw on top of whatever is swallowing them; the player draws above its peers.
-  for (const cell of cells) if (!cell.engulfedBy && cell !== player && !cell.colony) cell.draw(ctx, view, time)
+  for (const cell of cells)
+    if (!cell.engulfedBy && cell !== player && !cell.colony)
+      cell.draw(ctx, view, time, phase === 'living' && deathTime === null && player.canEat(cell))
   drawOrganismFeature(false)
   drawBridges()
   for (const cell of colony) cell.draw(ctx, view, time)
@@ -1791,6 +1901,7 @@ function render() {
     time,
   )
   drawZoneLabels(ctx, view, zones, player.traits, focus.x, focus.y)
+  drawThreatCue(dark)
   drawStickyIndicator()
   ctx.fillStyle = vignette
   ctx.fillRect(0, 0, view.w, view.h)
@@ -1852,6 +1963,25 @@ function updateHud() {
 }
 
 const tree = new TreeOfLife(hud.tree, save, () => updateHud())
+const guide = new FieldGuide(
+  () => input.release(),
+  () => !choosing && !confirming && !tree.isOpen,
+)
+
+const evolutionTree = new EvolutionTree(
+  () => ({
+    path: player.path,
+    traits: player.traits,
+    mutations: player.mutations,
+    canChoose:
+      choosing && !hud.evolve.classList.contains('mutant') && !!player.path && phase === 'living' && deathTime === null,
+    progress: `${eaten.mineral} / ${nextEvolutionCost()} minerals toward your next evolution`,
+  }),
+  id => {
+    if (choosing && availableTraits(player.traits, player.mutations).some(t => t.id === id)) choose(id)
+  },
+  () => input.release(),
+)
 
 function openTree() {
   if (choosing || confirming) return
@@ -1861,7 +1991,7 @@ function openTree() {
 
 /** After dying, any tap or key starts a new protocell (with a short pause so the burst can play). */
 function tryRestart(e: Event) {
-  if (tree.isOpen) return
+  if (tree.isOpen || evolutionTree.isOpen || guide.isOpen) return
   if (e instanceof KeyboardEvent && ['l', 'm', 'escape'].includes(e.key.toLowerCase())) return
   if (deathTime !== null && time - deathTime > 1.2) reset()
 }
@@ -1961,7 +2091,7 @@ function frame(now: number) {
   const elapsed = Math.min((now - last) / 1000, 0.1)
   last = now
   mutationSlow = Math.max(0, mutationSlow - elapsed)
-  if (tree.isOpen) acc = 0
+  if (tree.isOpen || guide.isOpen || evolutionTree.isOpen) acc = 0
   else
     acc +=
       elapsed * (choosing || confirming ? CHOICE_TIME_SCALE : phase === 'complete' ? 0.5 : mutationSlow > 0 ? 0.3 : 1)
@@ -2002,7 +2132,7 @@ requestAnimationFrame(frame)
 
 // Dev-only handle for poking at the simulation from the console.
 if (import.meta.env.DEV) {
-  Object.assign(window, {
+  const devTools = {
     game: {
       get player() {
         return player
@@ -2217,5 +2347,11 @@ if (import.meta.env.DEV) {
         return cell
       },
     },
-  })
+  }
+  Object.assign(window, devTools)
+  const playtest = gui.addFolder('Playtest')
+  playtest.add(devTools.game, 'gather').name('preview ecosystem')
+  playtest.add(devTools.game, 'readyTransition').name('prepare transition')
+  playtest.add(devTools.game, 'skipTimer').name('skip transition timer')
+  playtest.close()
 }

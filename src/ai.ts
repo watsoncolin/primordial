@@ -41,6 +41,8 @@ export interface Brain {
   recover: number
   fleeTime: number
   exhausted: number
+  attacker: Protocell | null
+  alarm: number
 }
 
 export function newBrain(): Brain {
@@ -57,6 +59,8 @@ export function newBrain(): Brain {
     recover: 0,
     fleeTime: 0,
     exhausted: 0,
+    attacker: null,
+    alarm: 0,
   }
 }
 
@@ -73,6 +77,8 @@ export interface Steer {
 export function think(cell: Protocell, dt: number, cells: Protocell[], nutrients: Nutrients, out: Steer) {
   const brain = cell.brain!
   cell.leanWant = 0
+  brain.alarm = Math.max(0, brain.alarm - dt)
+  if (brain.alarm <= 0 || brain.attacker?.gone || brain.attacker?.engulfedBy) brain.attacker = null
   // Anchored filter feeders don't swim; they turn into the current (main aims them).
   if (cell.species === 'filter') {
     out.x = out.y = out.mag = 0
@@ -103,6 +109,14 @@ export function think(cell: Protocell, dt: number, cells: Protocell[], nutrients
     out.x = Math.cos(brain.heading)
     out.y = Math.sin(brain.heading)
     out.mag = RECOVER_EFFORT
+    return out
+  }
+
+  // Injured prey abandon food; a hunter that can swallow its attacker retaliates.
+  if (brain.attacker && !(cell.species === 'engulfer' && cell.canEat(brain.attacker))) {
+    steerAt(cell, brain.attacker.cx, brain.attacker.cy, -1, out)
+    out.mag = cell.species === 'producer' ? 0.5 : 1
+    brain.prey = null
     return out
   }
 
@@ -147,6 +161,9 @@ export function think(cell: Protocell, dt: number, cells: Protocell[], nutrients
     brain.food = nearestFood(cell, nutrients, GRAZER_SENSE)
   }
 
+  if (brain.attacker && cell.species === 'engulfer' && cell.canEat(brain.attacker) && brain.rest <= 0) {
+    brain.prey = brain.attacker
+  }
   const prey = brain.prey
   if (prey && !prey.engulfedBy && !prey.gone) {
     steerAt(cell, prey.cx, prey.cy, 1, out)

@@ -935,3 +935,38 @@ kbd {
     padding: 0 24px;
   }
 }
+
+/* First evolution shows all four body paths together on desktop. */
+#evolve.paths .cards {
+  max-width: 1060px;
+}
+#evolve.paths .card {
+  width: 240px;
+}
+#evolve.paths .card .icon:has(.preview) {
+  width: 132px;
+  height: 132px;
+}
+@media (max-width: 700px) {
+  #evolve.paths .cards {
+    max-width: 100%;
+  }
+  #evolve.paths .card {
+    width: 100%;
+  }
+  #evolve.paths .card .icon:has(.preview) {
+    width: 90px;
+    height: 90px;
+  }
+}
+
+@media (max-width: 900px) {
+  #evolve.paths .card {
+    width: auto;
+    grid-template-columns: 90px 1fr;
+  }
+  #evolve.paths .card .icon:has(.preview) {
+    width: 90px;
+    height: 90px;
+  }
+}

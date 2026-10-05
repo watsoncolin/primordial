@@ -1,13 +1,16 @@
+import { PATHS, type PathId } from './paths'
 import type { Brain } from './ai'
 import {
   DETAIL_MIN_PX,
   PLANS,
+  PATH_PLANS,
   type BodyPlan,
   type ShapeSeed,
   drawFold,
   drawFringe,
   drawLightPlate,
   drawPlates,
+  drawRoleInterior,
   drawStalk,
   drawTraitMarks,
   newShapeSeed,
@@ -183,7 +186,7 @@ export class Protocell {
   readonly inner: Blob[] = []
   readonly digesting: Blob[] = []
   readonly species: Species
-  readonly palette: Palette
+  palette: Palette
   /** Size in units of the player's starting biomass. Radius ∝ sqrt(biomass). */
   biomass: number
   R: number
@@ -219,6 +222,10 @@ export class Protocell {
   dashCooldown = 0
   /** Seconds before spikes can tear this cell again. */
   spikeImmune = 0
+  ramRecovery = 0
+  wounded = 0
+  woundX = 1
+  woundY = 0
   readonly mutations = new Set<MutationId>()
   /** Unstable Mitosis: seconds until the next bud pops, and the bulge where it's forming. */
   budTimer = Infinity
@@ -235,7 +242,8 @@ export class Protocell {
   hazardRgb = '255,140,70'
   /** Seconds alive, for idle animation. */
   private age = 0
-  readonly plan: BodyPlan
+  path: PathId | null = null
+  plan: BodyPlan
   private readonly shapeSeed: ShapeSeed
   /** Rest radius multiplier per membrane point (the species' silhouette). */
   private readonly restScale = new Float32Array(POINTS)
@@ -367,7 +375,30 @@ export class Protocell {
         })
       }
     }
+    if (this.path) this.refreshPathShape()
     this.flash = 1
+  }
+
+  /** Morph the existing membrane toward the selected lineage without changing biomass. */
+  setPath(id: PathId) {
+    this.path = id
+    this.plan = PATH_PLANS[id]
+    this.palette = { ...this.palette, rim: PATHS[id].color, body: PATHS[id].color, highlight: PATHS[id].color }
+    this.refreshPathShape()
+    this.emphasis = 1
+  }
+
+  private refreshPathShape() {
+    for (let i = 0; i < POINTS; i++) {
+      const a = (i / POINTS) * TAU
+      let shape = this.plan.profile(a, this.shapeSeed)
+      // Branch anatomy modifies the base silhouette, never the biomass or collision radius.
+      if (this.path === 'pursuer' && this.traits.has('burst')) shape *= 1 + 0.15 * Math.cos(2 * a)
+      if (this.path === 'bulwark' && this.traits.has('spikes')) shape *= 1 + 0.13 * Math.max(0, Math.cos(a)) ** 4
+      if (this.path === 'trapper' && this.traits.has('tendril')) shape *= 1 + 0.12 * Math.sin(a) ** 2
+      if (this.path === 'producer' && this.traits.has('pigment')) shape *= 0.94 + 0.12 * Math.cos(5 * a)
+      this.restScale[i] = shape
+    }
   }
 
   /** Turn the whole body (and its tail) so its front faces (x, y): used when placing a new cell. */
@@ -487,6 +518,8 @@ export class Protocell {
     this.shielded = Math.max(0, this.shielded - dt)
     this.digest = Math.max(0, this.digest - dt)
     this.spikeImmune = Math.max(0, this.spikeImmune - dt)
+    this.ramRecovery = Math.max(0, this.ramRecovery - dt)
+    this.wounded = Math.max(0, this.wounded - dt)
     if (this.dashCooldown > 0) {
       this.dashCooldown = Math.max(0, this.dashCooldown - dt)
       if (this.dashCooldown === 0) this.flash = Math.max(this.flash, 0.5) // ready again
@@ -578,10 +611,10 @@ export class Protocell {
       tx = tx * 0.3 + fx * push
       ty = ty * 0.3 + fy * push
     }
-    // Directional bodies (hunters, scavengers, filter feeders) swing round to face their aim.
+    // Directional bodies and ram-equipped cells swing round to face their aim.
     // The torque also resists the body's current spin: without that, a body chasing a moving aim
     // keeps rotating, and a spinning teardrop in front-weighted drag swims like a propeller.
-    if (this.plan.directional && !tail) {
+    if ((this.plan.directional || this.traits.has('spikes')) && !tail) {
       const want = this.aimSet ? 1 : mag > 0.05 ? mag : 0
       let spin = 0
       let inertia = 0
@@ -597,7 +630,8 @@ export class Protocell {
         const ax = this.aimSet ? this.aimX : ix
         const ay = this.aimSet ? this.aimY : iy
         const err = Math.atan2(cos * ay - sin * ax, cos * ax + sin * ay)
-        wantTurn = this.plan.turn * clamp(err * 1.5, -1, 1) * want
+        const turnPower = this.plan.directional ? this.plan.turn : tuning.flagellumTurn * 0.65
+        wantTurn = turnPower * clamp(err * 1.5, -1, 1) * want
       }
       turn += wantTurn - ANGULAR_DAMP * omega * R
     }
@@ -845,7 +879,7 @@ export class Protocell {
     }
   }
 
-  draw(ctx: CanvasRenderingContext2D, view: View, time = 0) {
+  draw(ctx: CanvasRenderingContext2D, view: View, time = 0, edible = false) {
     const cx = view.sx(this.cx)
     const cy = view.sy(this.cy)
     const R = this.R * view.zoom
@@ -914,16 +948,25 @@ export class Protocell {
 
     ctx.save()
     ctx.clip(path)
-    if (this.species === 'producer' && detail) {
-      // Light-catching plates, one in each lobe.
-      const lobes = this.shapeSeed.lobes
-      const turn = Math.atan2(this.facingY, this.facingX)
-      for (let k = 0; k < lobes; k++) {
-        const a = turn + (TAU * k - this.shapeSeed.p1) / lobes
-        drawLightPlate(ctx, cx + Math.cos(a) * R * 0.5, cy + Math.sin(a) * R * 0.5, R * 0.22, a + Math.PI / 2, 1)
-      }
+    const anatomyRole = this.path ? PATHS[this.path].role : this.species
+    const specialist = ['engulfer', 'producer', 'scavenger', 'filter'].includes(anatomyRole)
+    if (specialist && detail) {
+      drawRoleInterior(
+        ctx,
+        anatomyRole,
+        cx,
+        cy,
+        R,
+        this.facingX,
+        this.facingY,
+        pal.rim,
+        time,
+        this.shapeSeed.lobes,
+        this.shapeSeed.p1,
+      )
+    } else if (!specialist) {
+      for (const b of this.inner) this.drawBlob(ctx, view.zoom, cx, cy, b, 0.9)
     }
-    for (const b of this.inner) this.drawBlob(ctx, view.zoom, cx, cy, b, 0.9)
     for (const b of this.digesting) {
       const t = b.life / b.maxLife
       this.drawBlob(ctx, view.zoom, cx, cy, b, 0.85 * Math.min(1, t * 2), Math.sqrt(t))
@@ -959,7 +1002,29 @@ export class Protocell {
       drawFringe(ctx, sx, sy, cx, cy, R, this.facingX, this.facingY, time, open, pal.rim)
     }
 
+    if (this.wounded > 0) {
+      ctx.save()
+      const angle = Math.atan2(this.woundY, this.woundX)
+      ctx.strokeStyle = `rgba(${edible ? '155,255,180' : '255,130,110'},${Math.min(0.9, this.wounded * 0.3)})`
+      ctx.lineWidth = Math.max(2, R * 0.07)
+      ctx.beginPath()
+      ctx.arc(cx, cy, R * 0.96, angle - 0.35, angle + 0.35)
+      ctx.stroke()
+      ctx.restore()
+    }
     if (this.traits.has('spikes')) {
+      // A frontal crest reads as an offensive device, with dimmed recovery.
+      ctx.save()
+      ctx.translate(cx, cy)
+      ctx.rotate(Math.atan2(this.facingY, this.facingX))
+      ctx.fillStyle = this.ramRecovery > 0 ? `rgba(${pal.rim},0.35)` : `rgba(${pal.rim},0.95)`
+      ctx.beginPath()
+      ctx.moveTo(R * 0.85, -R * 0.23)
+      ctx.lineTo(R * 1.45, 0)
+      ctx.lineTo(R * 0.85, R * 0.23)
+      ctx.closePath()
+      ctx.fill()
+      ctx.restore()
       // Barbs along the outward normal of every other membrane point.
       ctx.beginPath()
       for (let i = 0; i < POINTS; i += 2) {
@@ -1015,13 +1080,48 @@ export class Protocell {
       ctx.stroke(path)
     }
 
-    // Specular highlight.
-    ctx.beginPath()
-    ctx.arc(cx - R * 0.08, cy - R * 0.08, R * 0.7, Math.PI * 1.08, Math.PI * 1.42)
-    ctx.lineCap = 'round'
-    ctx.lineWidth = R * 0.07
-    ctx.strokeStyle = 'rgba(255,255,255,0.3)'
-    ctx.stroke()
+    // The soft sac keeps its glassy highlight; specialist bodies have their own material.
+    if (!specialist) {
+      ctx.beginPath()
+      ctx.arc(cx - R * 0.08, cy - R * 0.08, R * 0.7, Math.PI * 1.08, Math.PI * 1.42)
+      ctx.lineCap = 'round'
+      ctx.lineWidth = R * 0.07
+      ctx.strokeStyle = 'rgba(255,255,255,0.3)'
+      ctx.stroke()
+    }
+
+    if (this.species === 'engulfer' && this.pose === 'coil' && detail) {
+      // Two short forward chevrons mark the direction of the imminent strike.
+      const fx = this.facingX
+      const fy = this.facingY
+      ctx.beginPath()
+      for (const offset of [1.35, 1.55]) {
+        const x = cx + fx * R * offset
+        const y = cy + fy * R * offset
+        ctx.moveTo(x - fx * R * 0.13 - fy * R * 0.16, y - fy * R * 0.13 + fx * R * 0.16)
+        ctx.lineTo(x, y)
+        ctx.lineTo(x - fx * R * 0.13 + fy * R * 0.16, y - fy * R * 0.13 - fx * R * 0.16)
+      }
+      ctx.lineWidth = Math.max(2, R * 0.04)
+      ctx.strokeStyle = 'rgba(255,210,170,0.95)'
+      ctx.stroke()
+    }
+    if (this.species === 'player' && !this.colony && !this.gone && detail) {
+      const status =
+        this.traits.has('membrane') && this.armor < 1
+          ? `Armor resealing · ${Math.ceil((1 - this.armor) * MEMBRANE_RESEAL)}s`
+          : this.digest > 0
+            ? `Digesting · ${Math.ceil(this.digest)}s`
+            : ''
+      if (status) {
+        ctx.save()
+        ctx.font = '12px system-ui, sans-serif'
+        ctx.textAlign = 'center'
+        ctx.fillStyle = 'rgba(220,245,235,0.9)'
+        ctx.fillText(status, cx, cy + R * 1.5)
+        ctx.restore()
+      }
+    }
     ctx.globalAlpha = 1
   }
 

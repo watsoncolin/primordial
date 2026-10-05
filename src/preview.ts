@@ -1,3 +1,4 @@
+import { PATHS, type PathId } from './paths'
 import { Protocell } from './protocell'
 import { type TraitId, TRAITS } from './traits'
 import { View } from './view'
@@ -24,11 +25,12 @@ function lineage(id: TraitId): TraitId[] {
  * A small picture of the player's cell with this adaptation (and what it evolves from), as an
  * image URL for an evolution card: the card shows the actual body feature you're choosing.
  */
-export function traitPreview(id: TraitId, has: Set<TraitId>): string {
-  const key = [...lineage(id), ...has].join(',')
+export function traitPreview(id: TraitId, has: Set<TraitId>, path: PathId | null = null): string {
+  const key = `${path ?? 'base'}:${[...lineage(id), ...has].join(',')}`
   const hit = cache.get(key)
   if (hit) return hit
   const cell = new Protocell(0, 0, 1, 'player')
+  if (path) cell.setPath(path)
   cell.glows = false
   for (const t of has) cell.addTrait(t)
   for (const t of lineage(id)) if (!cell.traits.has(t)) cell.addTrait(t)
@@ -58,4 +60,8 @@ export function traitPreview(id: TraitId, has: Set<TraitId>): string {
   const url = canvas.toDataURL()
   cache.set(key, url)
   return url
+}
+
+export function pathPreview(path: PathId): string {
+  return traitPreview(PATHS[path].starter, new Set(), path)
 }

@@ -80,9 +80,10 @@ export const TRAITS: Record<TraitId, TraitInfo> = {
   },
   spikes: {
     id: 'spikes',
-    name: 'Spikes',
-    tagline: 'Your membrane hardens into barbs.',
-    detail: 'Ram cells too big to swallow and knock chunks of biomass off them. Anything that grabs you gets torn too.',
+    name: 'Ram Crest',
+    tagline: 'A reinforced prow for breaking larger prey.',
+    detail:
+      'Aim your prow and build speed to tear larger prey down to feeding size. Hits recoil and need 1.4 seconds to recover. Side barbs still punish anything that grabs you.',
     requires: 'membrane',
   },
   tendril: {
@@ -189,8 +190,17 @@ export const PHOTO_STILL_BONUS = 2
 /** How much farther away predators notice a glowing cell. */
 export const PHOTO_CONSPICUOUS = 1.6
 
-/** Minerals needed for each successive evolution. */
-export const EVOLUTION_COST = [8, 20, 36, 56, 80, 110, 150, 200, 260]
+/** Lifetime mineral milestones, not prices deducted from the collection counter. */
+export const EVOLUTION_COST = [12, 32, 62, 104, 160, 232, 322, 432, 564]
+
+/** Keep later adaptations earned even when new traits extend the roster. */
+export function evolutionThreshold(paidEvolutions: number): number {
+  const index = Math.max(0, Math.floor(paidEvolutions))
+  if (index < EVOLUTION_COST.length) return EVOLUTION_COST[index]
+  const extra = index - EVOLUTION_COST.length + 1
+  // After the table, gaps continue at 156, 182, 208... minerals.
+  return EVOLUTION_COST[EVOLUTION_COST.length - 1] + 156 * extra + 13 * extra * (extra - 1)
+}
 /** Burst jet: speed added along your facing, and seconds before you can do it again. */
 export const BURST_SPEED = 150
 export const BURST_COOLDOWN = 3
